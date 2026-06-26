@@ -62,6 +62,11 @@ target_link_libraries(FitomEmuIF PRIVATE
     rtaudio                               # RtAudio static lib (submodule)
 )
 
+# MSVC: ソースファイルを UTF-8 として扱う（日本語コメントのビルドエラー対策）
+if(MSVC)
+    target_compile_options(FitomEmuIF PRIVATE /utf-8)
+endif()
+
 # Linux: dlopen → libdl
 if(UNIX AND NOT APPLE)
     target_link_libraries(FitomEmuIF PRIVATE dl)
@@ -115,4 +120,7 @@ if(BUILD_FITOMEMUIF_TEST)
         ${CMAKE_CURRENT_SOURCE_DIR}/include
     )
     target_link_libraries(FitomEmuIF_test PRIVATE FitomEmuIF)
+    if(MSVC)
+        target_compile_options(FitomEmuIF_test PRIVATE /utf-8)
+    endif()
 endif()
