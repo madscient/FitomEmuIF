@@ -1,0 +1,58 @@
+{
+  "//": [
+    "FitomEmuIF プロファイル設定ファイル。",
+    "このファイルを fmhwif_profile.json という名前で",
+    "FitomEmuIF.dll と同じディレクトリに置くか、",
+    "環境変数 FMHWIF_PROFILE にパスを指定してください。",
+    "",
+    "DLL ロード時に一度だけ読み込まれ、FITOM とのリンク中は不変です。"
+  ],
+
+  "sample_rate":    44100,
+  "buffer_frames":  512,
+
+  "//audio": [
+    "audio_api: RtAudio バックエンド名（大文字小文字不問）",
+    "  auto / unspecified ... RtAudio が OS に合わせて自動選択（推奨）",
+    "  wasapi              ... Windows WASAPI",
+    "  asio                ... Windows ASIO",
+    "  ds / directsound    ... Windows DirectSound",
+    "  core / coreaudio    ... macOS Core Audio",
+    "  alsa                ... Linux ALSA",
+    "  pulse / pulseaudio  ... Linux PulseAudio",
+    "  jack                ... Linux/macOS JACK",
+    "",
+    "audio_device: 出力デバイス名の部分一致文字列。空文字でデフォルトデバイス。",
+    "  例: \"Realtek\"  \"USB Audio\"  \"Focusrite\""
+  ],
+  "audio_api":     "auto",
+  "audio_device":  "",
+
+  "engines": [
+    {
+      "//": "YMEngine.dll に OPM と OPNA を持たせる例。",
+      "//2": "1 つの FmEngine インスタンスに AddChip を 2 回呼ぶ。エンジン内でミックス。",
+      "dll": "YMEngine",
+      "chips": [
+        { "chip": "OPM",  "clock": 3579545, "pan": 0 },
+        { "chip": "OPNA", "clock": 7987200, "pan": 0 }
+      ]
+    },
+    {
+      "//": "別エンジン DLL で OPL3 を担当。コールバックで独立して Generate → ミックス。",
+      "dll": "OPLEngine",
+      "chips": [
+        { "chip": "OPL3", "clock": 14318181, "pan": 0 }
+      ]
+    },
+    {
+      "//": "同一チップを複数持つ例（index: 0, index: 1 で区別）。",
+      "//2": "pan: 1 = L only, pan: 2 = R only でステレオに振り分ける例。",
+      "dll": "AYEngine",
+      "chips": [
+        { "chip": "AY8910", "clock": 1789773, "pan": 1 },
+        { "chip": "AY8910", "clock": 1789773, "pan": 2 }
+      ]
+    }
+  ]
+}
