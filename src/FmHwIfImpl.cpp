@@ -48,10 +48,10 @@
 //
 // ─── スレッド安全性 ──────────────────────────────────────────────────────────
 //
-//  FmEngine_Write  : FmEngineApi 仕様でスレッドセーフ。
-//  FmEngine_Generate: オーディオコールバックスレッドから排他的に呼ぶ。
-//  generate_mutex  : HWPlugin_Write(MIDIスレッド) と コールバック の排他に使う。
-//                    同一 EngineInstance にのみ作用するため、異なる DLL 間は並行する。
+//  FmEngine_Write  : FmEngineApi 仕様でスレッドセーフ。Generate との同時実行も安全。
+//  FmEngine_Generate: オーディオコールバックスレッドから呼ぶ。
+//  mutex 不使用    : FmEngine_Write / Generate はともにスレッドセーフのため
+//                    HWPlugin_Write とコールバックの間に排他制御は不要。
 
 // FITOM_HW_PLUGIN_EXPORTS は CMake の target_compile_definitions で定義する
 
@@ -66,11 +66,15 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
-#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+// TODO: include/fitom/IHWPlugin.h は FITOM_X/plugin_sdk/include/fitom/IHWPlugin.h
+//       と内容を同期させる必要がある。
+//       推奨対処: FITOM_X を git submodule として参照し、そちらのヘッダを直接使う。
+//       暫定対処: CI で両ファイルの diff チェックを行う。
 
 // ════════════════════════════════════════════════════════════════════════════
 //  プラットフォーム DLL ユーティリティ
@@ -213,11 +217,6 @@ struct EngineInstance {
     FmEngineHandle engine = nullptr;
 
     std::vector<ChipSlot> slots;
-
-    // HWPlugin_Write（MIDIスレッド）と オーディオコールバック の排他ロック。
-    // FmEngine_Write 自体はスレッドセーフだが、Generate との同時実行を避けるため
-    // コールバック側も同じロックを取る。
-    std::mutex generate_mutex;
 
     // オーディオコールバック用一時バッファ（PluginRegistry が確保する）
     std::vector<float> tmp_l;
@@ -491,9 +490,6 @@ private:
         std::fill(out, out + n_frames * 2u, 0.f);
 
         for (auto& inst : self->engines) {
-            // Generate との排他ロック（HWPlugin_Write と同じロック）
-            std::lock_guard<std::mutex> lk(inst->generate_mutex);
-
             // tmp バッファが n_frames に足りない場合は安全にスキップ
             if (inst->tmp_l.size() < n_frames || inst->tmp_r.size() < n_frames)
                 continue;
@@ -636,16 +632,23 @@ FITOM_HWP_API HWResult FITOM_HWP_CALL HWPlugin_Open(
 
 FITOM_HWP_API void FITOM_HWP_CALL HWPlugin_Close(HWHandle handle) {
     if (!handle) return;
-    handle->is_open      = false;
-    handle->slot->in_use = false;
+    // pan オーバーライドが設定されていた場合、プロファイルの panpot 値に戻す
+    auto& inst = *handle->engine_inst;
+    auto& slot = *handle->slot;
+    if (handle->panpot_override >= 0) {
+        float l = 1.f, r = 1.f;
+        if (slot.panpot == 1) r = 0.f;
+        else if (slot.panpot == 2) l = 0.f;
+        inst.vtbl.SetGain(inst.engine, slot.chip_id, l, r);
+    }
+    handle->is_open = false;
+    slot.in_use     = false;
     delete handle;
 }
 
 // ── I/O ──────────────────────────────────────────────────────────────────────
 // addr 上位 8bit → port、下位 8bit → reg（IHWPlugin.h 規約）
-//
-// generate_mutex を取得する。オーディオコールバックが Generate 中の場合は
-// そのバッファ（≒ buffer_frames/sample_rate 秒）だけブロックして返す。
+// FmEngine_Write はスレッドセーフのため mutex 不要。
 
 FITOM_HWP_API HWResult FITOM_HWP_CALL HWPlugin_Write(
     HWHandle handle, uint16_t addr, uint8_t data)
@@ -657,7 +660,6 @@ FITOM_HWP_API HWResult FITOM_HWP_CALL HWPlugin_Write(
     uint32_t port = static_cast<uint32_t>(addr >> 8);
 
     auto& inst = *handle->engine_inst;
-    std::lock_guard<std::mutex> lk(inst.generate_mutex);
     FmResult fr = inst.vtbl.Write(inst.engine, handle->slot->chip_id, reg, data, port);
     return (fr == FM_OK) ? HW_OK : HW_ERR_IO;
 }
@@ -669,7 +671,6 @@ FITOM_HWP_API HWResult FITOM_HWP_CALL HWPlugin_WriteBlock(
     if (!handle->is_open) return HW_ERR_IO;
 
     auto& inst = *handle->engine_inst;
-    std::lock_guard<std::mutex> lk(inst.generate_mutex);
     for (size_t i = 0; i < len; ++i) {
         uint8_t reg = static_cast<uint8_t>((startAddr + i) & 0xFF);
         FmResult fr = inst.vtbl.Write(
@@ -686,7 +687,6 @@ FITOM_HWP_API HWResult FITOM_HWP_CALL HWPlugin_Reset(
     if (!handle->is_open) return HW_ERR_IO;
 
     auto& inst = *handle->engine_inst;
-    std::lock_guard<std::mutex> lk(inst.generate_mutex);
     for (uint32_t port = 0; port <= 1; ++port)
         for (uint32_t reg = 0; reg <= 0xFF; ++reg)
             inst.vtbl.Write(inst.engine, handle->slot->chip_id,
