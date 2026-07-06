@@ -4,9 +4,10 @@
 //
 // ─── アーキテクチャ ──────────────────────────────────────────────────────────
 //
-//  [DLL ロード時]  ← 構成はここで確定。FITOM とのリンク中は不変。
-//    PluginRegistry::instance() が fmhwif_profile.json を読み込み、
+//  [HWPlugin_Init]  ← FITOM が DLL ロード後に必ず呼ぶ。ここで構成が確定・以後不変。
+//    PluginRegistry::init() がプロファイルを読み込み、
 //    EngineInstance 群を生成したうえで RtAudio ストリームを 1 本起動する。
+//    呼ばれる前に他の関数を呼んだ場合は失敗を返す。
 //
 //  [オーディオコールバック]
 //    全 EngineInstance の FmEngine_Generate を呼んで float 加算ミックスし、
@@ -267,15 +268,15 @@ static RtAudio::Api parse_audio_api(const std::string& name) {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-//  PluginRegistry: DLL ロード時に一度だけ構築、以後不変
+//  PluginRegistry: HWPlugin_Init で明示的に初期化、以後不変
 // ════════════════════════════════════════════════════════════════════════════
 
 struct PluginRegistry {
     // ── プロファイル由来の設定 ─────────────────────────────────────────────
     uint32_t    sample_rate   = 44100;
     uint32_t    buffer_frames = 512;
-    std::string audio_api_name  = "auto";  // parse_audio_api に渡す
-    std::string audio_device_name;         // 空 = デフォルトデバイス
+    std::string audio_api_name  = "auto";
+    std::string audio_device_name;
 
     // ── エンジン群（プロファイルの engines[] に 1:1 対応）─────────────────
     std::vector<std::unique_ptr<EngineInstance>> engines;
@@ -284,7 +285,7 @@ struct PluginRegistry {
     std::unique_ptr<RtAudio> rtaudio;
 
     // ── 状態 ──────────────────────────────────────────────────────────────
-    bool        initialized = false;
+    bool        initialized = false; // HWPlugin_Init 成功後に true
     std::string init_error;
 
     // ─────────────────────────────────────────────────────────────────────
@@ -293,7 +294,61 @@ struct PluginRegistry {
         return reg;
     }
 
-    // ── プロファイルパス解決 ──────────────────────────────────────────────
+    // ── 明示的初期化 ─────────────────────────────────────────────────────
+    // HWPlugin_Init から呼ぶ。二重呼び出し時は HW_ERR_OPEN_FAILED を返す。
+    HWResult init(const char* profile_path) {
+        if (initialized) return HW_ERR_OPEN_FAILED; // 二重初期化禁止
+
+        // パス解決: 引数 → 環境変数 → DLL 隣 → カレントディレクトリ
+        std::optional<fs::path> resolved;
+        if (profile_path && profile_path[0] != '\0') {
+            fs::path p(profile_path);
+            if (fs::exists(p)) resolved = p;
+            else {
+                init_error = std::string("profile not found: ") + profile_path;
+                return HW_ERR_INVALID_ARG;
+            }
+        } else {
+            resolved = find_profile();
+        }
+
+        if (!resolved) {
+            init_error = "profile not found";
+            return HW_ERR_INVALID_ARG;
+        }
+
+        try {
+            std::ifstream ifs(*resolved);
+            if (!ifs)
+                throw std::runtime_error("cannot open: " + resolved->string());
+
+            json root = json::parse(ifs, nullptr, true, true); // コメント許可
+
+            sample_rate       = root.value("sample_rate",   44100u);
+            buffer_frames     = root.value("buffer_frames", 512u);
+            audio_api_name    = root.value("audio_api",     std::string("auto"));
+            audio_device_name = root.value("audio_device",  std::string(""));
+
+            for (auto& eng_json : root.at("engines"))
+                load_engine(eng_json);
+
+            start_audio();
+
+            initialized = true;
+            return HW_OK;
+        } catch (const std::exception& e) {
+            init_error = e.what();
+            // ロード途中で確保したエンジンを解放する
+            engines.clear();
+            rtaudio.reset();
+            return HW_ERR_OPEN_FAILED;
+        }
+    }
+
+private:
+    PluginRegistry() = default; // 自動初期化しない
+
+    // ── プロファイルパス解決（引数未指定時のフォールバック）────────────────
     // 優先順:
     //   1. 環境変数 FMHWIF_PROFILE
     //   2. FitomEmuIF.dll と同じディレクトリの fmhwif_profile.json
@@ -312,42 +367,6 @@ struct PluginRegistry {
             if (fs::exists(p)) return p;
         }
         return std::nullopt;
-    }
-
-private:
-    PluginRegistry() { load(); }
-
-    // ── メイン初期化 ─────────────────────────────────────────────────────
-    void load() {
-        auto profile_path = find_profile();
-        if (!profile_path) {
-            // プロファイルなし → 空構成で初期化済みとする
-            initialized = true;
-            return;
-        }
-
-        try {
-            std::ifstream ifs(*profile_path);
-            if (!ifs)
-                throw std::runtime_error("cannot open: " + profile_path->string());
-
-            json root = json::parse(ifs, nullptr, true, true); // コメント許可
-
-            sample_rate       = root.value("sample_rate",   44100u);
-            buffer_frames     = root.value("buffer_frames", 512u);
-            audio_api_name    = root.value("audio_api",     std::string("auto"));
-            audio_device_name = root.value("audio_device",  std::string(""));
-
-            for (auto& eng_json : root.at("engines"))
-                load_engine(eng_json);
-
-            start_audio();
-
-            initialized = true;
-        } catch (const std::exception& e) {
-            init_error  = e.what();
-            initialized = false;
-        }
     }
 
     // ── エンジン 1 つのロード ─────────────────────────────────────────────
@@ -541,21 +560,30 @@ FITOM_HWP_API const char* FITOM_HWP_CALL HWPlugin_GetName() {
     return "FitomEmuIF";
 }
 
+// ── 初期化 ────────────────────────────────────────────────────────────────────
+// profile_path: プロファイルファイルの絶対/相対パス。
+//   nullptr または空文字: 環境変数 FMHWIF_PROFILE → DLL 隣 → カレントディレクトリ の順で探索。
+//   パスを指定した場合: そのファイルが存在しなければ HW_ERR_INVALID_ARG を返す。
+
+FITOM_HWP_API HWResult FITOM_HWP_CALL HWPlugin_Init(const char* profile_path) {
+    return PluginRegistry::instance().init(profile_path);
+}
+
 // ── デバイス列挙 ──────────────────────────────────────────────────────────────
 
 FITOM_HWP_API const char* FITOM_HWP_CALL HWPlugin_Enumerate() {
-    json arr = json::array();
     auto& reg = PluginRegistry::instance();
-    if (reg.initialized) {
-        for (auto& inst : reg.engines) {
-            for (auto& slot : inst->slots) {
-                json e;
-                e["type"]   = "FMHWIF";
-                e["engine"] = slot.engine_dll_name;
-                e["chip"]   = slot.chip_name;
-                e["index"]  = slot.index;
-                arr.push_back(std::move(e));
-            }
+    if (!reg.initialized) return nullptr;
+
+    json arr = json::array();
+    for (auto& inst : reg.engines) {
+        for (auto& slot : inst->slots) {
+            json e;
+            e["type"]   = "FMHWIF";
+            e["engine"] = slot.engine_dll_name;
+            e["chip"]   = slot.chip_name;
+            e["index"]  = slot.index;
+            arr.push_back(std::move(e));
         }
     }
     std::string s = arr.dump();
@@ -697,10 +725,12 @@ FITOM_HWP_API HWResult FITOM_HWP_CALL HWPlugin_Reset(
 // ── メタ情報 ─────────────────────────────────────────────────────────────────
 
 FITOM_HWP_API int FITOM_HWP_CALL HWPlugin_GetClock(HWHandle handle) {
-    return handle ? handle->slot->clock : 0;
+    if (!handle) return 0;
+    return handle->slot->clock;
 }
 FITOM_HWP_API int FITOM_HWP_CALL HWPlugin_GetPanpot(HWHandle handle) {
-    return handle ? effective_panpot(handle) : 0;
+    if (!handle) return 0;
+    return effective_panpot(handle);
 }
 FITOM_HWP_API bool FITOM_HWP_CALL HWPlugin_IsOpen(HWHandle handle) {
     return handle && handle->is_open;
@@ -712,6 +742,7 @@ FITOM_HWP_API uint32_t FITOM_HWP_CALL HWPlugin_GetLatencySamples(HWHandle handle
     // レイテンシ = RtAudio が使う実際の buffer_frames（openStream 後に確定）
     if (!handle) return 0;
     auto& reg = PluginRegistry::instance();
+    if (!reg.initialized) return 0;
     return reg.buffer_frames;
 }
 
