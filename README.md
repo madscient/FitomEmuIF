@@ -35,9 +35,9 @@ FITOM core
 
 ## プロファイル JSON
 
-ファイル名 `fmhwif_profile.json` を以下の場所に置く（優先順）:
+ファイル名 `fmemuif_profile.json` を以下の場所に置く（優先順）:
 
-1. 環境変数 `FMHWIF_PROFILE` で指定したパス
+1. 環境変数 `FMEMUIF_PROFILE` で指定したパス
 2. `FitomEmuIF.dll` と同じディレクトリ
 3. カレントディレクトリ
 

@@ -61,6 +61,14 @@ extern "C" {
 // プラグイン名を返す ("FitomIFTest", "DummyHW" 等)
 FITOM_HWP_API const char* FITOM_HWP_CALL HWPlugin_GetName();
 
+// ─── 初期化 ──────────────────────────────────────────────────────────────────
+// プラグインを初期化する。FITOM は DLL ロード後、他の関数を呼ぶ前に必ず呼ぶこと。
+// profile_path: プラグイン固有の設定ファイルパス。nullptr または空文字でデフォルト探索。
+// 戻り値: HW_OK = 成功、HW_ERR_INVALID_ARG = プロファイル解析失敗、
+//         HW_ERR_OPEN_FAILED = デバイス/ストリーム起動失敗
+// 初期化前に他の関数を呼んだ場合の動作は未定義（実装は失敗を返すこと）。
+FITOM_HWP_API HWResult FITOM_HWP_CALL HWPlugin_Init(const char* profile_path);
+
 // ─── デバイス列挙 ────────────────────────────────────────────────────────────
 // 接続デバイスを JSON 文字列で返す (呼び出し元は HWPlugin_FreeString で解放)
 // 失敗時は nullptr

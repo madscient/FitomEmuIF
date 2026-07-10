@@ -1,4 +1,4 @@
-// FmHwIfImpl.cpp
+// FmEmuIfImpl.cpp
 // FitomEmuIF: IHWPlugin を実装し、FmEngineApi 互換 DLL を複数束ね、
 //             RtAudio で PCM をオーディオデバイスへ出力する hwif プラグイン。
 //
@@ -23,7 +23,7 @@
 //    プロファイル定義済みの ChipSlot への参照を返すだけ。
 //    エンジン本体・RtAudio ストリームは PluginRegistry が管理する。
 //
-// ─── プロファイル JSON (fmhwif_profile.json) ─────────────────────────────────
+// ─── プロファイル JSON (fmemuif_profile.json) ─────────────────────────────────
 //
 //  {
 //    "sample_rate":   44100,       // 全エンジン共通サンプルレート
@@ -70,6 +70,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 // TODO: include/fitom/IHWPlugin.h は FITOM_X/plugin_sdk/include/fitom/IHWPlugin.h
@@ -135,6 +136,7 @@ struct FmEngineVtbl {
     decltype(&FmEngine_GetSampleRate)    GetSampleRate    = nullptr;
     decltype(&FmEngine_Write)            Write            = nullptr;
     decltype(&FmEngine_SetGain)          SetGain          = nullptr;
+    decltype(&FmEngine_SetMemory)        SetMemory        = nullptr;
     decltype(&FmEngine_Generate)         Generate         = nullptr;
 };
 
@@ -158,6 +160,7 @@ static FmEngineVtbl load_vtbl(DllHandle h) {
     LOAD_SYM(v, h, GetSampleRate);
     LOAD_SYM(v, h, Write);
     LOAD_SYM(v, h, SetGain);
+    LOAD_SYM(v, h, SetMemory);
     LOAD_SYM(v, h, Generate);
     return v;
 }
@@ -222,6 +225,11 @@ struct EngineInstance {
     // オーディオコールバック用一時バッファ（PluginRegistry が確保する）
     std::vector<float> tmp_l;
     std::vector<float> tmp_r;
+
+    // PCM/ADPCM メモリイメージの所有バッファ。
+    // FmEngine_SetMemory はポインタの寿命を呼び出し元が管理するため、
+    // エンジンと同寿命のここで保持する。キーはカタログ種別名。
+    std::unordered_map<std::string, std::vector<uint8_t>> pcm_images;
 
     EngineInstance() = default;
     EngineInstance(const EngineInstance&) = delete;
@@ -329,8 +337,20 @@ struct PluginRegistry {
             audio_api_name    = root.value("audio_api",     std::string("auto"));
             audio_device_name = root.value("audio_device",  std::string(""));
 
+            // PCM イメージカタログの読み込み
+            // pcm_catalog: カタログ JSON ファイルへのパス（省略可）
+            // パスはプロファイルファイルからの相対パスとして解釈する
+            json pcm_catalog;
+            if (auto cit = root.find("pcm_catalog"); cit != root.end()) {
+                fs::path catalog_path = resolved->parent_path() / cit->get<std::string>();
+                std::ifstream cfs(catalog_path);
+                if (!cfs)
+                    throw std::runtime_error("cannot open pcm_catalog: " + catalog_path.string());
+                pcm_catalog = json::parse(cfs, nullptr, true, true);
+            }
+
             for (auto& eng_json : root.at("engines"))
-                load_engine(eng_json);
+                load_engine(eng_json, pcm_catalog);
 
             start_audio();
 
@@ -350,27 +370,27 @@ private:
 
     // ── プロファイルパス解決（引数未指定時のフォールバック）────────────────
     // 優先順:
-    //   1. 環境変数 FMHWIF_PROFILE
-    //   2. FitomEmuIF.dll と同じディレクトリの fmhwif_profile.json
-    //   3. カレントディレクトリの fmhwif_profile.json
+    //   1. 環境変数 FMEMUIF_PROFILE
+    //   2. FitomEmuIF.dll と同じディレクトリの fmemuif_profile.json
+    //   3. カレントディレクトリの fmemuif_profile.json
     static std::optional<fs::path> find_profile() {
-        if (const char* env = std::getenv("FMHWIF_PROFILE")) {
+        if (const char* env = std::getenv("FMEMUIF_PROFILE")) {
             fs::path p(env);
             if (fs::exists(p)) return p;
         }
         {
-            fs::path p = fs::path(dll_dir()) / "fmhwif_profile.json";
+            fs::path p = fs::path(dll_dir()) / "fmemuif_profile.json";
             if (fs::exists(p)) return p;
         }
         {
-            fs::path p = fs::current_path() / "fmhwif_profile.json";
+            fs::path p = fs::current_path() / "fmemuif_profile.json";
             if (fs::exists(p)) return p;
         }
         return std::nullopt;
     }
 
     // ── エンジン 1 つのロード ─────────────────────────────────────────────
-    void load_engine(const json& eng_json) {
+    void load_engine(const json& eng_json, const json& pcm_catalog) {
         std::string dll_raw = eng_json.at("dll").get<std::string>();
 
         auto inst = std::make_unique<EngineInstance>();
@@ -416,6 +436,12 @@ private:
             slot.panpot          = panpot;
 
             apply_panpot(*inst, slot);
+
+            // PCM/ADPCM メモリイメージをこのチップに設定する
+            // FmEngine_SetMemory はオーディオストリーム開始前に呼ぶ必要がある
+            if (!pcm_catalog.is_null())
+                apply_pcm_images(*inst, slot, pcm_catalog);
+
             inst->slots.push_back(std::move(slot));
         }
 
@@ -428,6 +454,104 @@ private:
         if (slot.panpot == 1) r = 0.f;
         else if (slot.panpot == 2) l = 0.f;
         inst.vtbl.SetGain(inst.engine, slot.chip_id, l, r);
+    }
+
+    // ── PCM/ADPCM メモリイメージをチップに設定 ───────────────────────────
+    //
+    // チップ名 → 使用するカタログキーと FmMemoryType の対応:
+    //
+    //  チップ                   カタログキー          FmMemoryType
+    //  ─────────────────────────────────────────────────────────────
+    //  OPNA (YM2608)            ADPCM-B               FM_MEM_ADPCM_B
+    //                           OPNA_RHYTHM           FM_MEM_ADPCM_A  (リズムROM)
+    //  OPNB / OPNBB (YM2610/B)  ADPCM-A               FM_MEM_ADPCM_A
+    //                           OPNB_ADPCM-B          FM_MEM_ADPCM_B
+    //  Y8950                    ADPCM-B               FM_MEM_ADPCM_B
+    //  OPL4 (YMF278)            OPL4AWM               FM_MEM_PCM
+    //
+    // カタログにエントリがない種別はスキップする（エラーにしない）。
+    // イメージデータは inst.pcm_images に所有させ、エンジンと同寿命にする。
+    //
+    // 注: FmEngine_SetMemory はオーディオストリーム開始前に呼ぶこと（仕様）。
+    //     load_engine() → apply_pcm_images() → start_audio() の順を守る。
+
+    // チップ名 → (カタログキー, FmMemoryType) のリストを返す
+    struct PcmMapping { const char* catalog_key; FmMemoryType mem_type; };
+    static std::vector<PcmMapping> pcm_mappings_for_chip(const std::string& chip_name) {
+        // 大文字小文字を区別しない比較
+        auto ieq = [&](const char* s) {
+            if (chip_name.size() != std::strlen(s)) return false;
+            for (size_t i = 0; i < chip_name.size(); ++i)
+                if (std::tolower((unsigned char)chip_name[i])
+                    != std::tolower((unsigned char)s[i])) return false;
+            return true;
+        };
+
+        if (ieq("OPNA") || ieq("YM2608"))
+            return { {"ADPCM-B",     FM_MEM_ADPCM_B},
+                     {"OPNA_RHYTHM", FM_MEM_ADPCM_A} };
+
+        if (ieq("OPNB") || ieq("YM2610") || ieq("OPNBB") || ieq("YM2610B"))
+            return { {"ADPCM-A",      FM_MEM_ADPCM_A},
+                     {"OPNB_ADPCM-B", FM_MEM_ADPCM_B} };
+
+        if (ieq("Y8950"))
+            return { {"ADPCM-B", FM_MEM_ADPCM_B} };
+
+        if (ieq("OPL4") || ieq("YMF278"))
+            return { {"OPL4AWM", FM_MEM_PCM} };
+
+        return {}; // PCM メモリを持たないチップ
+    }
+
+    static void apply_pcm_images(EngineInstance& inst,
+                                  const ChipSlot& slot,
+                                  const json& catalog)
+    {
+        auto mappings = pcm_mappings_for_chip(slot.chip_name);
+        if (mappings.empty()) return;
+
+        auto images_it = catalog.find("images");
+        if (images_it == catalog.end()) return;
+        const json& images = *images_it;
+
+        for (const auto& m : mappings) {
+            auto entry = images.find(m.catalog_key);
+            if (entry == images.end()) continue; // このチップのエントリなし → スキップ
+
+            const std::string& file_path = entry->get<std::string>();
+
+            // すでに同キーのイメージをロード済みの場合は再利用する
+            // （同一エンジン内で同チップ種別が複数あるケースへの対応）
+            if (inst.pcm_images.count(m.catalog_key) == 0) {
+                std::ifstream ifs(file_path, std::ios::binary | std::ios::ate);
+                if (!ifs)
+                    throw std::runtime_error(
+                        std::string("cannot open PCM image [") + m.catalog_key
+                        + "]: " + file_path);
+
+                auto size = static_cast<std::streamsize>(ifs.tellg());
+                ifs.seekg(0);
+                std::vector<uint8_t> buf(static_cast<size_t>(size));
+                if (!ifs.read(reinterpret_cast<char*>(buf.data()), size))
+                    throw std::runtime_error(
+                        std::string("failed to read PCM image [") + m.catalog_key
+                        + "]: " + file_path);
+
+                inst.pcm_images[m.catalog_key] = std::move(buf);
+            }
+
+            const auto& image = inst.pcm_images.at(m.catalog_key);
+            FmResult fr = inst.vtbl.SetMemory(
+                inst.engine, slot.chip_id,
+                m.mem_type,
+                image.data(),
+                static_cast<uint32_t>(image.size()));
+            if (fr != FM_OK)
+                throw std::runtime_error(
+                    std::string("FmEngine_SetMemory failed [") + m.catalog_key
+                    + "] chip=" + slot.chip_name);
+        }
     }
 
     // ── RtAudio ストリーム起動 ────────────────────────────────────────────
@@ -562,7 +686,7 @@ FITOM_HWP_API const char* FITOM_HWP_CALL HWPlugin_GetName() {
 
 // ── 初期化 ────────────────────────────────────────────────────────────────────
 // profile_path: プロファイルファイルの絶対/相対パス。
-//   nullptr または空文字: 環境変数 FMHWIF_PROFILE → DLL 隣 → カレントディレクトリ の順で探索。
+//   nullptr または空文字: 環境変数 FMEMUIF_PROFILE → DLL 隣 → カレントディレクトリ の順で探索。
 //   パスを指定した場合: そのファイルが存在しなければ HW_ERR_INVALID_ARG を返す。
 
 FITOM_HWP_API HWResult FITOM_HWP_CALL HWPlugin_Init(const char* profile_path) {

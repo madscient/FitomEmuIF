@@ -1,9 +1,9 @@
 {
   "//": [
     "FitomEmuIF プロファイル設定ファイル。",
-    "このファイルを fmhwif_profile.json という名前で",
+    "このファイルを fmemuif_profile.json という名前で",
     "FitomEmuIF.dll と同じディレクトリに置くか、",
-    "環境変数 FMHWIF_PROFILE にパスを指定してください。",
+    "環境変数 FMEMUIF_PROFILE にパスを指定してください。",
     "",
     "DLL ロード時に一度だけ読み込まれ、FITOM とのリンク中は不変です。"
   ],
@@ -27,6 +27,15 @@
   ],
   "audio_api":     "auto",
   "audio_device":  "",
+
+  "//pcm": [
+    "pcm_catalog: PCM/ADPCM メモリイメージカタログ JSON へのパス（省略可）。",
+    "パスはこのプロファイルファイルからの相対パスとして解釈される。",
+    "カタログの種別 (ADPCM-A / ADPCM-B / OPNB_ADPCM-B / OPNA_RHYTHM / OPL4AWM) と",
+    "チップ名の対応に基づき、自動的に FmEngine_SetMemory が呼ばれる。",
+    "対応チップを持たないエンジンには影響しない。"
+  ],
+  "pcm_catalog": "pcm_images.catalog.json",
 
   "engines": [
     {

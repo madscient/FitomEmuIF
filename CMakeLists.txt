@@ -46,7 +46,7 @@ add_subdirectory(${RTAUDIO_DIR} extern/rtaudio EXCLUDE_FROM_ALL)
 #  ターゲット: FitomEmuIF
 # ════════════════════════════════════════════════════════════════════════════
 add_library(FitomEmuIF SHARED
-    src/FmHwIfImpl.cpp
+    src/FmEmuIfImpl.cpp
 )
 
 target_compile_definitions(FitomEmuIF PRIVATE
@@ -54,7 +54,7 @@ target_compile_definitions(FitomEmuIF PRIVATE
 )
 
 target_include_directories(FitomEmuIF PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/include   # IHWPlugin.h, FmEngineApi.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src       # fitom/IHWPlugin.h, fitom/FmEngineApi.h
 )
 
 target_link_libraries(FitomEmuIF PRIVATE
@@ -115,9 +115,9 @@ install(TARGETS FitomEmuIF
 # ════════════════════════════════════════════════════════════════════════════
 option(BUILD_FITOMEMUIF_TEST "Build smoke test" OFF)
 if(BUILD_FITOMEMUIF_TEST)
-    add_executable(FitomEmuIF_test test/smoke_test.cpp)
+    add_executable(FitomEmuIF_test src/smoke_test.cpp)
     target_include_directories(FitomEmuIF_test PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
     )
     target_link_libraries(FitomEmuIF_test PRIVATE FitomEmuIF)
     if(MSVC)
