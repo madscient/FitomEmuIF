@@ -113,6 +113,20 @@ FITOM_HWP_API uint32_t FITOM_HWP_CALL HWPlugin_GetLatencySamples(HWHandle handle
 FITOM_HWP_API void FITOM_HWP_CALL HWPlugin_SetDelaySamples(
     HWHandle handle, uint32_t delay_samples);
 
+// ─── プラグイン全体のシャットダウン（任意実装だが強く推奨）───────────────────
+// HWPlugin_Shutdown:
+//   プラグイン全体を安全に停止する。HWPlugin_Init が成功した後、
+//   FITOM_X がプロセスを終了する前に一度だけ呼ぶ（HWPlugin_Open/Close の
+//   呼び出し回数・順序とは独立）。
+//   この関数の中で、オーディオストリーム等のバックグラウンドリソースを
+//   同期的に（呼び出しから戻った時点で完全に停止・スレッドが join 済みの
+//   状態になるまで）停止すること。
+//   通常のメインスレッドのコンテキストで呼ばれる（DllMain の中ではない）。
+//   冪等性は不要（FITOM_X 側で二重呼び出しをガードする）。
+//   未実装でも動作する（FITOM_X は GetProcAddress/dlsym で探索し、
+//   見つからなければスキップする）。
+FITOM_HWP_API void FITOM_HWP_CALL HWPlugin_Shutdown();
+
 #ifdef __cplusplus
 }
 #endif

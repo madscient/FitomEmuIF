@@ -6,6 +6,31 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 # ════════════════════════════════════════════════════════════════════════════
+#  VS2026 (Visual Studio 18 2026) / CMake 4.x 対応
+#
+#  VS2026 は CMake 4.2 以降を同梱する。CMake 4.0 で
+#  cmake_minimum_required(VERSION < 3.5) を宣言する古いプロジェクトの
+#  configure がエラーになるポリシーが導入された
+#  ("Compatibility with CMake < 3.5 has been removed")。
+#
+#  本プロジェクト自体は 3.18 を要求しており問題ないが、submodule の
+#  RtAudio (extern/rtaudio) は cmake_minimum_required(VERSION 3.0) を
+#  宣言しているため、CMake 4.x で configure が失敗する。
+#  CMAKE_POLICY_VERSION_MINIMUM を RtAudio の add_subdirectory 直前だけ
+#  一時的に設定して回避する（自プロジェクトのポリシーには影響させない）。
+#
+#  参考: https://cmake.org/cmake/help/latest/policy/CMP0000.html
+# ════════════════════════════════════════════════════════════════════════════
+
+# MSVC ランタイムライブラリを明示する。
+# toolset v145 (VS2026 既定) は CMP0091 の既定値が変わる可能性があるため、
+# FitomEmuIF・RtAudio 間でランタイムが食い違い LNK2038 が出ないよう固定する。
+if(MSVC)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY
+        "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+endif()
+
+# ════════════════════════════════════════════════════════════════════════════
 #  依存: nlohmann_json
 #  システムインストール版を優先し、なければ FetchContent で取得する。
 # ════════════════════════════════════════════════════════════════════════════
@@ -40,7 +65,15 @@ endif()
 set(RTAUDIO_BUILD_STATIC_LIBS ON  CACHE BOOL "" FORCE)
 set(RTAUDIO_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(RTAUDIO_BUILD_TESTING     OFF CACHE BOOL "" FORCE)
+
+# RtAudio 自体の cmake_minimum_required(VERSION 3.0) が CMake 4.x で
+# configure エラーになるため、add_subdirectory 中だけポリシー下限を緩める。
+# CMAKE_POLICY_VERSION_MINIMUM が未設定の CMake < 3.31 環境では単に無視される。
+set(_fitom_saved_policy_min "${CMAKE_POLICY_VERSION_MINIMUM}")
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 add_subdirectory(${RTAUDIO_DIR} extern/rtaudio EXCLUDE_FROM_ALL)
+set(CMAKE_POLICY_VERSION_MINIMUM "${_fitom_saved_policy_min}")
+unset(_fitom_saved_policy_min)
 
 # ════════════════════════════════════════════════════════════════════════════
 #  ターゲット: FitomEmuIF

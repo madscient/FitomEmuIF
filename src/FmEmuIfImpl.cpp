@@ -293,7 +293,8 @@ struct PluginRegistry {
     std::unique_ptr<RtAudio> rtaudio;
 
     // ── 状態 ──────────────────────────────────────────────────────────────
-    bool        initialized = false; // HWPlugin_Init 成功後に true
+    bool        initialized   = false; // HWPlugin_Init 成功後に true
+    bool        shutdown_done = false; // HWPlugin_Shutdown 実行済みか
     std::string init_error;
 
     // ─────────────────────────────────────────────────────────────────────
@@ -363,6 +364,31 @@ struct PluginRegistry {
             rtaudio.reset();
             return HW_ERR_OPEN_FAILED;
         }
+    }
+
+    // ── 明示的シャットダウン ─────────────────────────────────────────────
+    // HWPlugin_Shutdown から呼ぶ。RtAudio ストリームを同期的に停止・close する。
+    // 呼び出しから戻った時点でオーディオコールバックスレッドは join 済みである
+    // ことを保証する（RtAudio::stopStream/closeStream の仕様に依る）。
+    // メインスレッドから呼ばれる前提（DllMain からは呼ばれない）。
+    // 冪等性は不要だが、多重呼び出しで安全なように shutdown_done で防御する。
+    void shutdown() {
+        if (shutdown_done) return;
+        shutdown_done = true;
+
+        if (rtaudio) {
+            if (rtaudio->isStreamOpen()) {
+                if (rtaudio->isStreamRunning()) {
+                    rtaudio->stopStream();  // 同期的にコールバックスレッドを停止
+                }
+                rtaudio->closeStream();
+            }
+            rtaudio.reset();
+        }
+        // エンジン群（FmEngine ハンドル・DLL ハンドル）は EngineInstance の
+        // デストラクタで解放されるため、ここでは engines.clear() を呼ばない。
+        // HWPlugin_Shutdown 後に HWPlugin_Write 等が呼ばれた場合は
+        // rtaudio 停止済みでもエンジン自体は生きているため安全に失敗を返せる。
     }
 
 private:
@@ -874,6 +900,15 @@ FITOM_HWP_API void FITOM_HWP_CALL HWPlugin_SetDelaySamples(
     HWHandle /*handle*/, uint32_t /*delay_samples*/)
 {
     // buffer_frames == delay_samples となるよう FITOM が設定するため no-op。
+}
+
+// ── プラグイン全体のシャットダウン ────────────────────────────────────────────
+// HWPlugin_Init が成功した後、FITOM_X がプロセスを終了する前に一度だけ呼ばれる。
+// RtAudio ストリームを同期的に停止・close する（呼び出しから戻った時点で
+// オーディオコールバックスレッドは join 済み）。メインスレッドから呼ばれる前提。
+
+FITOM_HWP_API void FITOM_HWP_CALL HWPlugin_Shutdown() {
+    PluginRegistry::instance().shutdown();
 }
 
 } // extern "C"

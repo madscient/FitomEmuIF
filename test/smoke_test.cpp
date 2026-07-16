@@ -47,6 +47,7 @@ int main() {
 
     // 4. Init: nullptr（デフォルト探索）→ プロファイルなし環境では HW_ERR_INVALID_ARG
     //    プロファイルが存在する環境では HW_OK になる場合がある
+    bool env_initialized = false;
     {
         HWResult r = HWPlugin_Init(nullptr);
         printf("      Init(nullptr): %s\n",
@@ -57,6 +58,7 @@ int main() {
         // プロファイルなし環境: HW_ERR_INVALID_ARG
         // プロファイルあり環境: HW_OK または HW_ERR_OPEN_FAILED（エンジン DLL なし）
         assert(r == HW_OK || r == HW_ERR_INVALID_ARG || r == HW_ERR_OPEN_FAILED);
+        env_initialized = (r == HW_OK);
         PASS("Init(nullptr) -> expected result for environment");
     }
 
@@ -74,35 +76,64 @@ int main() {
         PASS("nullptr safety");
     }
 
-    // 6. Open: 不正 JSON → HW_ERR_INVALID_ARG（Init 状態に関わらず）
+    // 6-9. Open のパラメータ検証テスト。
+    //      HWPlugin_Open は「未初期化チェック」を JSON 解析より先に行うため、
+    //      Init が失敗している環境（プロファイルなし等）では JSON の内容に
+    //      関わらず常に HW_ERR_OPEN_FAILED を返す。
+    //      Init が成功している環境（env_initialized、手順4で判定済み）でのみ、
+    //      各パラメータ検証の結果が個別に現れる。
+
+    // 6. Open: 不正 JSON
     {
         HWHandle h = nullptr;
-        assert(HWPlugin_Open("not json", &h) == HW_ERR_INVALID_ARG);
-        PASS("Open(invalid json) -> HW_ERR_INVALID_ARG");
+        HWResult r = HWPlugin_Open("not json", &h);
+        if (env_initialized)
+            assert(r == HW_ERR_INVALID_ARG);
+        else
+            assert(r == HW_ERR_OPEN_FAILED);
+        PASS("Open(invalid json) -> expected result for Init state");
     }
 
-    // 7. Open: type != FMHWIF → HW_ERR_INVALID_ARG
+    // 7. Open: type != FMHWIF
     {
         HWHandle h = nullptr;
-        assert(HWPlugin_Open(R"({"type":"RE1"})", &h) == HW_ERR_INVALID_ARG);
-        PASS("Open(type!=FMHWIF) -> HW_ERR_INVALID_ARG");
+        HWResult r = HWPlugin_Open(R"({"type":"RE1"})", &h);
+        if (env_initialized)
+            assert(r == HW_ERR_INVALID_ARG);
+        else
+            assert(r == HW_ERR_OPEN_FAILED);
+        PASS("Open(type!=FMHWIF) -> expected result for Init state");
     }
 
-    // 8. Open: engine/chip 欠落 → HW_ERR_INVALID_ARG
+    // 8. Open: engine/chip 欠落
     {
         HWHandle h = nullptr;
-        assert(HWPlugin_Open(R"({"type":"FMHWIF"})", &h) == HW_ERR_INVALID_ARG);
-        PASS("Open(no engine/chip) -> HW_ERR_INVALID_ARG");
+        HWResult r = HWPlugin_Open(R"({"type":"FMHWIF"})", &h);
+        if (env_initialized)
+            assert(r == HW_ERR_INVALID_ARG);
+        else
+            assert(r == HW_ERR_OPEN_FAILED);
+        PASS("Open(no engine/chip) -> expected result for Init state");
     }
 
-    // 9. Open: プロファイル未定義の (engine, chip) → HW_ERR_NOT_FOUND または HW_ERR_OPEN_FAILED
+    // 9. Open: プロファイル未定義の (engine, chip)
     {
         HWHandle h = nullptr;
         HWResult r = HWPlugin_Open(
             R"({"type":"FMHWIF","engine":"NonExistent","chip":"OPM"})", &h);
-        assert(r == HW_ERR_NOT_FOUND || r == HW_ERR_OPEN_FAILED);
+        if (env_initialized)
+            assert(r == HW_ERR_NOT_FOUND || r == HW_ERR_OPEN_FAILED);
+        else
+            assert(r == HW_ERR_OPEN_FAILED);
         assert(h == nullptr);
-        PASS("Open(unlisted engine/chip) -> HW_ERR_NOT_FOUND or HW_ERR_OPEN_FAILED");
+        PASS("Open(unlisted engine/chip) -> expected result for Init state");
+    }
+
+    // 10. Shutdown: 未実装環境でも呼べる／複数回呼んでも安全
+    {
+        HWPlugin_Shutdown();
+        HWPlugin_Shutdown(); // 二重呼び出しでも crash しないこと
+        PASS("Shutdown safe to call (including twice)");
     }
 
     printf("\nAll %d smoke tests passed.\n", pass_count);
