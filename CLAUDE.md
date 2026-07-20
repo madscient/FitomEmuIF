@@ -56,3 +56,13 @@ JSON フォーマット、PCM/ADPCM カタログ、ライフサイクル等）�
    不要と判明）。
 5. `HWPlugin_Open` で `pan` を上書きした場合のみ、`HWPlugin_Close` 時にプロファイルの
    `panpot` 値へ `SetGain` で戻す。
+6. **PCM カタログ `images[]` のパス解決基点を、実行時カレントディレクトリ基点から
+   カタログファイル自身のディレクトリ基点に変更（2026年7月20日、FITOM_staging側の
+   運用検証で発覚）**。旧実装は `pcm_catalog` 自体（プロファイルファイル相対）と
+   `images[]` の値（CWD相対）とで解決基点が異なっており、かつ `../FitomHwIF` の
+   `PcmCatalog::load()` は最初から「カタログファイル相対」で実装されていたため、
+   hwif/emuif 間でカタログ JSON の可搬性が無かった（同じカタログファイルを両方が
+   参照する運用が事実上不可能だった）。`FmEmuIfImpl.cpp` の `apply_pcm_images()` を
+   `FitomHwIF::PcmCatalog::load()` と同じ規則（`is_absolute() ? そのまま : catalog_dir / path`）
+   に統一し、`load_engine()`/`apply_pcm_images()` にカタログディレクトリを引き回すように
+   変更した。README.md・`pcm_images.catalog.example.json` の該当記述も修正済み。

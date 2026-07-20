@@ -342,16 +342,18 @@ struct PluginRegistry {
             // pcm_catalog: カタログ JSON ファイルへのパス（省略可）
             // パスはプロファイルファイルからの相対パスとして解釈する
             json pcm_catalog;
+            fs::path pcm_catalog_dir; // images[] 内の相対パスの解決基点
             if (auto cit = root.find("pcm_catalog"); cit != root.end()) {
                 fs::path catalog_path = resolved->parent_path() / cit->get<std::string>();
                 std::ifstream cfs(catalog_path);
                 if (!cfs)
                     throw std::runtime_error("cannot open pcm_catalog: " + catalog_path.string());
                 pcm_catalog = json::parse(cfs, nullptr, true, true);
+                pcm_catalog_dir = catalog_path.parent_path();
             }
 
             for (auto& eng_json : root.at("engines"))
-                load_engine(eng_json, pcm_catalog);
+                load_engine(eng_json, pcm_catalog, pcm_catalog_dir);
 
             start_audio();
 
@@ -416,7 +418,8 @@ private:
     }
 
     // ── エンジン 1 つのロード ─────────────────────────────────────────────
-    void load_engine(const json& eng_json, const json& pcm_catalog) {
+    void load_engine(const json& eng_json, const json& pcm_catalog,
+                      const fs::path& pcm_catalog_dir) {
         std::string dll_raw = eng_json.at("dll").get<std::string>();
 
         auto inst = std::make_unique<EngineInstance>();
@@ -466,7 +469,7 @@ private:
             // PCM/ADPCM メモリイメージをこのチップに設定する
             // FmEngine_SetMemory はオーディオストリーム開始前に呼ぶ必要がある
             if (!pcm_catalog.is_null())
-                apply_pcm_images(*inst, slot, pcm_catalog);
+                apply_pcm_images(*inst, slot, pcm_catalog, pcm_catalog_dir);
 
             inst->slots.push_back(std::move(slot));
         }
@@ -497,6 +500,12 @@ private:
     //
     // カタログにエントリがない種別はスキップする（エラーにしない）。
     // イメージデータは inst.pcm_images に所有させ、エンジンと同寿命にする。
+    //
+    // images[] の値（イメージファイルへのパス）は、絶対パスならそのまま、
+    // 相対パスならカタログファイル自身のディレクトリを基準に解決する
+    // （FitomHwIF の PcmCatalog::load() と同じ規則に統一。2026年7月〜。
+    //  旧実装はここを実行時カレントディレクトリ基点で解決しており、
+    //  hwif/emuif 間でカタログの可搬性が無かった）。
     //
     // 注: FmEngine_SetMemory はオーディオストリーム開始前に呼ぶこと（仕様）。
     //     load_engine() → apply_pcm_images() → start_audio() の順を守る。
@@ -532,7 +541,8 @@ private:
 
     static void apply_pcm_images(EngineInstance& inst,
                                   const ChipSlot& slot,
-                                  const json& catalog)
+                                  const json& catalog,
+                                  const fs::path& catalog_dir)
     {
         auto mappings = pcm_mappings_for_chip(slot.chip_name);
         if (mappings.empty()) return;
@@ -545,7 +555,10 @@ private:
             auto entry = images.find(m.catalog_key);
             if (entry == images.end()) continue; // このチップのエントリなし → スキップ
 
-            const std::string& file_path = entry->get<std::string>();
+            fs::path raw_path(entry->get<std::string>());
+            // 相対パスはカタログファイル自身のディレクトリを基準に解決する
+            fs::path file_path = raw_path.is_absolute()
+                ? raw_path : catalog_dir / raw_path;
 
             // すでに同キーのイメージをロード済みの場合は再利用する
             // （同一エンジン内で同チップ種別が複数あるケースへの対応）
@@ -554,7 +567,7 @@ private:
                 if (!ifs)
                     throw std::runtime_error(
                         std::string("cannot open PCM image [") + m.catalog_key
-                        + "]: " + file_path);
+                        + "]: " + file_path.string());
 
                 auto size = static_cast<std::streamsize>(ifs.tellg());
                 ifs.seekg(0);
@@ -562,7 +575,7 @@ private:
                 if (!ifs.read(reinterpret_cast<char*>(buf.data()), size))
                     throw std::runtime_error(
                         std::string("failed to read PCM image [") + m.catalog_key
-                        + "]: " + file_path);
+                        + "]: " + file_path.string());
 
                 inst.pcm_images[m.catalog_key] = std::move(buf);
             }
