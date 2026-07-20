@@ -9,11 +9,12 @@
 FITOM core
   └── HWPort (IPort アダプター)
         └── IHWPlugin C API  ← FitomEmuIF.dll（このライブラリ）
-              ├── PluginRegistry  (static singleton, DLL ロード時確定・以後不変)
+              ├── PluginRegistry  (static singleton, HWPlugin_Init で確定・以後不変)
               │     ├── EngineInstance [YMEngine.dll]
               │     │     ├── FmEngineHandle  (FmEngine_Create)
               │     │     ├── ChipSlot[0]  OPM  chip_id=0
-              │     │     └── ChipSlot[1]  OPNA chip_id=1
+              │     │     ├── ChipSlot[1]  OPNA chip_id=1
+              │     │     └── pcm_images   (SetMemory 用データ、エンジンと同寿命)
               │     ├── EngineInstance [OPLEngine.dll]
               │     │     ├── FmEngineHandle
               │     │     └── ChipSlot[0]  OPL3 chip_id=0
@@ -26,12 +27,15 @@ FITOM core
 
 ### スレッドモデル
 
-| スレッド | 操作 | ロック |
+| スレッド | 操作 | 排他制御 |
 |---|---|---|
-| MIDI 処理スレッド | `HWPlugin_Write` → `FmEngine_Write` | `EngineInstance::generate_mutex` |
-| RtAudio コールバック | `FmEngine_Generate` | `EngineInstance::generate_mutex` |
+| MIDI 処理スレッド | `HWPlugin_Write` → `FmEngine_Write` | なし |
+| RtAudio コールバック | `FmEngine_Generate` | なし |
 
-`generate_mutex` はエンジン DLL ごとに独立するため、異なる DLL への Write は並行実行される。
+`FmEngine_Write` / `FmEngine_Generate` は `FmEngineApi` の仕様上どちらもスレッドセーフで、
+同時に呼び出しても安全なため、mutex 等の明示的な排他制御は行っていない
+（`FmEngine_SetMemory` はこれらと異なりスレッドセーフではないため、
+オーディオストリーム開始前の一度きりの呼び出しに限定している。後述）。
 
 ## プロファイル JSON
 
@@ -49,6 +53,7 @@ FITOM core
   "buffer_frames": 512,        // RtAudio バッファサイズ兼レイテンシ申告値
   "audio_api":     "auto",     // RtAudio API 名（下表参照）
   "audio_device":  "",         // デバイス名部分一致。空文字でデフォルトデバイス
+  "pcm_catalog":   "pcm_images.catalog.json",  // PCM/ADPCM イメージカタログへのパス（省略可、下記参照）
 
   "engines": [
     {
@@ -96,11 +101,78 @@ FITOM core
 同一チップ種別を複数持つ場合は同じ `chip` 名を複数回書く。
 `HWPlugin_Open` の `index` フィールド（0 始まり）で区別する。
 
-### 構成確定タイミング
+#### PCM/ADPCM イメージカタログ (`pcm_catalog`)
 
-`PluginRegistry` は `static` シングルトン。DLL がプロセスにロードされた時点で
-プロファイルを読み込み、エンジンを起動し、RtAudio ストリームを開始する。  
-FITOM とのリンク中はプロファイルの変更は反映されない。
+`pcm_catalog` はプロファイルファイルからの相対パスで指定する（省略可）。
+指定した場合、`engines[].chips` のロード時に読み込まれ、チップ種別に応じて
+自動的に `FmEngine_SetMemory` が呼ばれる。フォーマットは FITOM_X の
+`config_schema/pcm_image_catalog.schema.json`（`*.pcm_image_catalog.json` 慣習）に
+準拠する:
+
+```jsonc
+{
+  "images": {
+    "ADPCM-A":      "samples/ym2610b_adpcma.bin",
+    "ADPCM-B":      "samples/opna_adpcmb.bin",
+    "OPNB_ADPCM-B": "samples/ym2610b_adpcmb.bin",
+    "OPNA_RHYTHM":  "samples/opna_rhythm_rom.bin",
+    "OPL4AWM":      "samples/opl4_awm_rom.bin"
+  }
+}
+```
+
+`images` の各値（イメージファイルへのパス）は**カタログファイルからの相対パスではない**。
+実行時のカレントディレクトリ、または絶対パスとして解決される
+（`pcm_catalog` 自体がプロファイルファイルからの相対パスで解決されるのとは対照的なので注意）。
+
+チップ種別ごとに参照するカタログキーと `FmMemoryType` の対応（`FmEmuIfImpl.cpp` の
+`pcm_mappings_for_chip()` にハードコードされている）:
+
+| チップ | カタログキー | FmMemoryType |
+|---|---|---|
+| OPNA / YM2608 | `ADPCM-B` | `FM_MEM_ADPCM_B` |
+| OPNA / YM2608 | `OPNA_RHYTHM` | `FM_MEM_ADPCM_A`（内蔵リズム音源 ROM） |
+| OPNB/OPNBB / YM2610/B | `ADPCM-A` | `FM_MEM_ADPCM_A` |
+| OPNB/OPNBB / YM2610/B | `OPNB_ADPCM-B` | `FM_MEM_ADPCM_B` |
+| Y8950 | `ADPCM-B` | `FM_MEM_ADPCM_B` |
+| OPL4 / YMF278 | `OPL4AWM` | `FM_MEM_PCM` |
+
+OPNB/OPNBB の ADPCM-B は OPNA/Y8950 とメモリのバウンダリ（アドレッシング境界）が異なるため、
+`ADPCM-B` を共有せず専用の `OPNB_ADPCM-B` キーを使う（FITOM_X スキーマの規約と同じ）。
+
+カタログにエントリがない種別はスキップされる（エラーにしない）。対応表にないチップ種別
+（OPM, OPL3 等 PCM メモリを持たないチップ）には影響しない。同一エンジン内で同じチップ種別を
+複数回使う場合、イメージデータはカタログキー単位で一度だけ読み込まれ、`EngineInstance` 内で
+チップと同寿命のバッファとして共有される。
+
+`FmEngine_SetMemory` は `FmEngineApi` の仕様上スレッドセーフではなく、オーディオストリーム
+開始前に呼ぶ必要があるため、`HWPlugin_Init` の中で `load_engine()`（チップ追加 → PCM イメージ
+適用）を全エンジン分終えたあとに RtAudio ストリームを起動する順序になっている。
+
+### 初期化・終了処理のライフサイクル
+
+`PluginRegistry` は `static` シングルトンだが、**DLL ロード時点では自動初期化しない**。
+FITOM が `HWPlugin_Init(profile_path)` を明示的に呼んだ時点で初めてプロファイル
+（および `pcm_catalog`）を読み込み、各エンジン DLL のロード・チップ追加・PCM イメージ適用を
+行い、RtAudio ストリームを起動する。
+
+```
+1. FITOM が DLL をロード（この時点では PluginRegistry は未初期化）
+2. FITOM が HWPlugin_Init(profile_path) を呼ぶ
+     → プロファイル/カタログ読み込み・エンジン起動・RtAudio ストリーム開始が確定
+     → 以後 FITOM とのリンク中は構成不変（プロファイルの変更は反映されない）
+3. HWPlugin_Enumerate / Open / Write / ... の通常運用
+4. FITOM がプロセス終了前に HWPlugin_Shutdown() を一度だけ呼ぶ
+     （任意実装だが強く推奨。未実装でも FITOM 側が GetProcAddress/dlsym で
+       探索し、見つからなければスキップする）
+     → RtAudio ストリームを同期的に stop/close する
+       （呼び出しから戻った時点でオーディオコールバックスレッドは join 済み）
+```
+
+`HWPlugin_Init` が呼ばれる前（または失敗した後）に他の関数を呼んだ場合はすべて安全な
+失敗値を返す: `HWPlugin_Enumerate` → `nullptr`、`HWPlugin_Open` → `HW_ERR_OPEN_FAILED`、
+`HWPlugin_GetLatencySamples` → `0` 等。`HWPlugin_Shutdown` は複数回呼んでも安全
+（2 回目以降は no-op）。
 
 ## ビルド
 
@@ -126,6 +198,15 @@ cmake --build build
 ./build/FitomEmuIF_test
 ```
 
+### VS2026 (CMake 4.x) 対応について
+
+`extern/rtaudio` は `cmake_minimum_required(VERSION 3.0)` を宣言しているため、
+CMake 4.x（VS2026 同梱版）では `add_subdirectory` 時に configure エラーとなる。
+`CMakeLists.txt` は RtAudio の `add_subdirectory` 実行中だけ `CMAKE_POLICY_VERSION_MINIMUM`
+を一時的に緩和してこれを回避している（自プロジェクト自体のポリシーには影響しない）。
+また MSVC ビルドでは `CMAKE_MSVC_RUNTIME_LIBRARY` を明示し、FitomEmuIF と RtAudio 間で
+ランタイムライブラリが食い違って `LNK2038` になるのを防いでいる。
+
 ### 依存一覧
 
 | 依存 | 取得方法 |
@@ -149,6 +230,10 @@ cmake --build build
 | `pan` | プロファイル値 | 省略時はプロファイルの `pan` を引き継ぐ |
 
 プロファイルに定義されていない `(engine, chip, index)` は `HW_ERR_NOT_FOUND`。
+
+`pan` を指定して Open した場合、`HWPlugin_Close` 時にプロファイル定義の `pan` 値へ
+自動的に戻る（`FmEngine_SetGain` を呼び直す）。`pan` を省略して Open した場合
+（プロファイル値をそのまま使った場合）は Close 時に何もしない。
 
 ## fitom.conf.json 記述例
 

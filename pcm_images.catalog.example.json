@@ -1,0 +1,24 @@
+{
+  "_comment": [
+    "FitomEmuIF が読み込む PCM/ADPCM イメージカタログの例。",
+    "fmemuif_profile.json の \"pcm_catalog\" からこのファイルへの相対パスを指定する。",
+    "",
+    "フォーマットは FITOM_X の config_schema/pcm_image_catalog.schema.json",
+    "(*.pcm_image_catalog.json 慣習) に準拠する。",
+    "",
+    "images 以下の各値（ファイルパス）は、このカタログファイルからの相対パスではなく、",
+    "実行時のカレントディレクトリ、または絶対パスとして解決される点に注意。",
+    "",
+    "キーとチップ種別・FmMemoryType の対応は README.md の",
+    "「PCM/ADPCM イメージカタログ (pcm_catalog)」を参照。",
+    "対応表にないキー、対応するチップを持たないエンジンのエントリーは無視される。"
+  ],
+
+  "images": {
+    "ADPCM-A":      "samples/ym2610b_adpcma.bin",
+    "ADPCM-B":      "samples/opna_adpcmb.bin",
+    "OPNB_ADPCM-B": "samples/ym2610b_adpcmb.bin",
+    "OPNA_RHYTHM":  "samples/opna_rhythm_rom.bin",
+    "OPL4AWM":      "samples/opl4_awm_rom.bin"
+  }
+}

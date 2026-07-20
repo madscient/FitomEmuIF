@@ -33,7 +33,8 @@
     "パスはこのプロファイルファイルからの相対パスとして解釈される。",
     "カタログの種別 (ADPCM-A / ADPCM-B / OPNB_ADPCM-B / OPNA_RHYTHM / OPL4AWM) と",
     "チップ名の対応に基づき、自動的に FmEngine_SetMemory が呼ばれる。",
-    "対応チップを持たないエンジンには影響しない。"
+    "対応チップを持たないエンジンには影響しない。",
+    "カタログファイル自体のフォーマット例は pcm_images.catalog.example.json を参照。"
   ],
   "pcm_catalog": "pcm_images.catalog.json",
 
