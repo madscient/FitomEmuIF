@@ -341,15 +341,22 @@ struct PluginRegistry {
             // PCM イメージカタログの読み込み
             // pcm_catalog: カタログ JSON ファイルへのパス（省略可）
             // パスはプロファイルファイルからの相対パスとして解釈する
+            // カタログ自体の読み込みに失敗しても HWPlugin_Init 全体は失敗させず、
+            // PCM/ADPCM ケーパビリティを静かに無効化するのみとする。
             json pcm_catalog;
             fs::path pcm_catalog_dir; // images[] 内の相対パスの解決基点
             if (auto cit = root.find("pcm_catalog"); cit != root.end()) {
-                fs::path catalog_path = resolved->parent_path() / cit->get<std::string>();
-                std::ifstream cfs(catalog_path);
-                if (!cfs)
-                    throw std::runtime_error("cannot open pcm_catalog: " + catalog_path.string());
-                pcm_catalog = json::parse(cfs, nullptr, true, true);
-                pcm_catalog_dir = catalog_path.parent_path();
+                try {
+                    fs::path catalog_path = resolved->parent_path() / cit->get<std::string>();
+                    std::ifstream cfs(catalog_path);
+                    if (!cfs)
+                        throw std::runtime_error("cannot open pcm_catalog: " + catalog_path.string());
+                    pcm_catalog = json::parse(cfs, nullptr, true, true);
+                    pcm_catalog_dir = catalog_path.parent_path();
+                } catch (const std::exception&) {
+                    pcm_catalog = json();
+                    pcm_catalog_dir.clear();
+                }
             }
 
             for (auto& eng_json : root.at("engines"))
@@ -507,6 +514,10 @@ private:
     //  旧実装はここを実行時カレントディレクトリ基点で解決しており、
     //  hwif/emuif 間でカタログの可搬性が無かった）。
     //
+    // ファイルが開けない・読み込めない・FmEngine_SetMemory が失敗する等の
+    // 場合もエラーにはせず、該当ケーパビリティ（このカタログキー）を静かに
+    // 無効化するだけとし、他のキーやチップ・エンジン全体の初期化は継続する。
+    //
     // 注: FmEngine_SetMemory はオーディオストリーム開始前に呼ぶこと（仕様）。
     //     load_engine() → apply_pcm_images() → start_audio() の順を守る。
 
@@ -555,41 +566,46 @@ private:
             auto entry = images.find(m.catalog_key);
             if (entry == images.end()) continue; // このチップのエントリなし → スキップ
 
-            fs::path raw_path(entry->get<std::string>());
-            // 相対パスはカタログファイル自身のディレクトリを基準に解決する
-            fs::path file_path = raw_path.is_absolute()
-                ? raw_path : catalog_dir / raw_path;
+            try {
+                fs::path raw_path(entry->get<std::string>());
+                // 相対パスはカタログファイル自身のディレクトリを基準に解決する
+                fs::path file_path = raw_path.is_absolute()
+                    ? raw_path : catalog_dir / raw_path;
 
-            // すでに同キーのイメージをロード済みの場合は再利用する
-            // （同一エンジン内で同チップ種別が複数あるケースへの対応）
-            if (inst.pcm_images.count(m.catalog_key) == 0) {
-                std::ifstream ifs(file_path, std::ios::binary | std::ios::ate);
-                if (!ifs)
+                // すでに同キーのイメージをロード済みの場合は再利用する
+                // （同一エンジン内で同チップ種別が複数あるケースへの対応）
+                if (inst.pcm_images.count(m.catalog_key) == 0) {
+                    std::ifstream ifs(file_path, std::ios::binary | std::ios::ate);
+                    if (!ifs)
+                        throw std::runtime_error(
+                            std::string("cannot open PCM image [") + m.catalog_key
+                            + "]: " + file_path.string());
+
+                    auto size = static_cast<std::streamsize>(ifs.tellg());
+                    ifs.seekg(0);
+                    std::vector<uint8_t> buf(static_cast<size_t>(size));
+                    if (!ifs.read(reinterpret_cast<char*>(buf.data()), size))
+                        throw std::runtime_error(
+                            std::string("failed to read PCM image [") + m.catalog_key
+                            + "]: " + file_path.string());
+
+                    inst.pcm_images[m.catalog_key] = std::move(buf);
+                }
+
+                const auto& image = inst.pcm_images.at(m.catalog_key);
+                FmResult fr = inst.vtbl.SetMemory(
+                    inst.engine, slot.chip_id,
+                    m.mem_type,
+                    image.data(),
+                    static_cast<uint32_t>(image.size()));
+                if (fr != FM_OK)
                     throw std::runtime_error(
-                        std::string("cannot open PCM image [") + m.catalog_key
-                        + "]: " + file_path.string());
-
-                auto size = static_cast<std::streamsize>(ifs.tellg());
-                ifs.seekg(0);
-                std::vector<uint8_t> buf(static_cast<size_t>(size));
-                if (!ifs.read(reinterpret_cast<char*>(buf.data()), size))
-                    throw std::runtime_error(
-                        std::string("failed to read PCM image [") + m.catalog_key
-                        + "]: " + file_path.string());
-
-                inst.pcm_images[m.catalog_key] = std::move(buf);
+                        std::string("FmEngine_SetMemory failed [") + m.catalog_key
+                        + "] chip=" + slot.chip_name);
+            } catch (const std::exception&) {
+                // このケーパビリティ（カタログキー）のみ無効化し、他は継続する
+                continue;
             }
-
-            const auto& image = inst.pcm_images.at(m.catalog_key);
-            FmResult fr = inst.vtbl.SetMemory(
-                inst.engine, slot.chip_id,
-                m.mem_type,
-                image.data(),
-                static_cast<uint32_t>(image.size()));
-            if (fr != FM_OK)
-                throw std::runtime_error(
-                    std::string("FmEngine_SetMemory failed [") + m.catalog_key
-                    + "] chip=" + slot.chip_name);
         }
     }
 
