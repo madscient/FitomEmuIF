@@ -504,6 +504,7 @@ private:
     //                           OPNB_ADPCM-B          FM_MEM_ADPCM_B
     //  Y8950                    ADPCM-B               FM_MEM_ADPCM_B
     //  OPL4 (YMF278)            OPL4AWM               FM_MEM_PCM
+    //  SSGS / SSGS2 (YMZ705/YMZ732)  SSGS_ADPCM       FM_MEM_PCM
     //
     // カタログにエントリがない種別はスキップする（エラーにしない）。
     // イメージデータは inst.pcm_images に所有させ、エンジンと同寿命にする。
@@ -546,6 +547,9 @@ private:
 
         if (ieq("OPL4") || ieq("YMF278"))
             return { {"OPL4AWM", FM_MEM_PCM} };
+
+        if (ieq("SSGS") || ieq("YMZ705") || ieq("SSGS2") || ieq("YMZ732"))
+            return { {"SSGS_ADPCM", FM_MEM_PCM} };
 
         return {}; // PCM メモリを持たないチップ
     }

@@ -116,7 +116,8 @@ FITOM core
     "ADPCM-B":      "samples/opna_adpcmb.bin",
     "OPNB_ADPCM-B": "samples/ym2610b_adpcmb.bin",
     "OPNA_RHYTHM":  "samples/opna_rhythm_rom.bin",
-    "OPL4AWM":      "samples/opl4_awm_rom.bin"
+    "OPL4AWM":      "samples/opl4_awm_rom.bin",
+    "SSGS_ADPCM":   "samples/ssgs_adpcm_rom.bin"
   }
 }
 ```
@@ -138,9 +139,14 @@ hwif/emuif 間でカタログの可搬性が無かった）。
 | OPNB/OPNBB / YM2610/B | `OPNB_ADPCM-B` | `FM_MEM_ADPCM_B` |
 | Y8950 | `ADPCM-B` | `FM_MEM_ADPCM_B` |
 | OPL4 / YMF278 | `OPL4AWM` | `FM_MEM_PCM` |
+| SSGS / YMZ705 | `SSGS_ADPCM` | `FM_MEM_PCM`（ADPCM 部の外部メモリ） |
+| SSGS2 / YMZ732 | `SSGS_ADPCM` | `FM_MEM_PCM`（ADPCM 部の外部メモリ） |
 
 OPNB/OPNBB の ADPCM-B は OPNA/Y8950 とメモリのバウンダリ（アドレッシング境界）が異なるため、
 `ADPCM-B` を共有せず専用の `OPNB_ADPCM-B` キーを使う（FITOM_X スキーマの規約と同じ）。
+
+SSGS/SSGS2 は ADPCM 部の制御・外部メモリ構造が同一のため、`SSGS_ADPCM` を共有する
+（FITOM_X スキーマの規約と同じ）。
 
 カタログにエントリがない種別はスキップされる（エラーにしない）。対応表にないチップ種別
 （OPM, OPL3 等 PCM メモリを持たないチップ）には影響しない。同一エンジン内で同じチップ種別を

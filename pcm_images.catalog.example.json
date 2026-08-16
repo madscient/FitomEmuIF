@@ -20,6 +20,7 @@
     "ADPCM-B":      "samples/opna_adpcmb.bin",
     "OPNB_ADPCM-B": "samples/ym2610b_adpcmb.bin",
     "OPNA_RHYTHM":  "samples/opna_rhythm_rom.bin",
-    "OPL4AWM":      "samples/opl4_awm_rom.bin"
+    "OPL4AWM":      "samples/opl4_awm_rom.bin",
+    "SSGS_ADPCM":   "samples/ssgs_adpcm_rom.bin"
   }
 }
