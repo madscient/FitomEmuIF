@@ -42,9 +42,20 @@ JSON フォーマット、PCM/ADPCM カタログ、ライフサイクル等）�
    submodule 化する、または CI で diff チェックする。
 2. **FitomIFTest (`fitom_hw.dll`) 側の `HWPlugin_Init`/`HWPlugin_Shutdown` 対応状況が未確認**
    （`plugin-hwif.md` の要件は物理HW側にも同じ `IHWPlugin.h` 実装を求めている）。
-3. **実エンジン DLL・実 RtAudio submodule でのビルド・音声出力は未検証**
-   （検証済みなのは構文チェックとスタブ構成でのビルド・スモークテストのみ）。
-4. **VS2026 (toolset v145) 実機ビルドは未検証**（Linux + CMake 3.28 でのロジック検証のみ）。
+3. **音声出力は未検証**。2026年10月1日に、VS2026（toolset v145、MSVC 19.51）と実 RtAudio
+   （WASAPI のみ有効。submodule の記録 e5f0774 ではなく、作業ツリーにあった c0a533d）で
+   Release ビルドが通った。実エンジン DLL（YMEngine の `YMFMEngine.dll`）を使って、
+   `HWPlugin_Init`（オーディオストリームの起動を含む）→ `Open` → `GetClock` が動くことも
+   確認した。音が出るか、正しく鳴るかは聴いていない。Linux/macOS の実機ビルドもしていない。
+4. **部位ごとのゲイン調整を中継するインターフェースを後で実装する**。YMEngine に
+   `FmEngine_SetPartGain` / `FmEngine_GetPartGain` が追加された（`FM_PART_FM` と
+   `FM_PART_SSG`。SSG は OPN/OPNA/OPNB/OPNBB）。実機では FM と SSG の出力をボード上の回路で
+   ミックスするので、音量バランスは機種で違う。これを FitomEmuIF から設定できるようにする。
+   - 未定：設定の入口（プロファイルのキーか、FITOM_X から呼ぶ IHWPlugin の関数か）。
+     どちらも外から見える値なので、実装前に決める
+   - 他のエンジン DLL はこの関数を持たないことがある。`LOAD_SYM`（見つからないと例外）
+     ではなく、任意のシンボルとして読む
+   - `src/fitom/FmEngineApi.h` は追加前の版のままなので、YMEngine の最新版に同期する
 
 ## 設計判断の経緯（再度議論が必要な場合の背景）
 
