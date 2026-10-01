@@ -12,12 +12,9 @@
 //  [オーディオコールバック]
 //    全 EngineInstance の FmEngine_Generate を呼んで float 加算ミックスし、
 //    RtAudio インターリーブバッファに書き出す。
-//    FmEngine_Write との排他は各 EngineInstance の generate_mutex で行う。
 //
 //  [HWPlugin_Write]
-//    generate_mutex を取得して FmEngine_Write を呼ぶ。
-//    コールバックが走っている間はブロックするが、buffer_frames/sample_rate 秒以内に
-//    必ず解放される。
+//    FmEngine_Write をそのまま呼ぶ（排他が要らない理由は「スレッド安全性」を参照）。
 //
 //  [HWPlugin_Open / Close]
 //    プロファイル定義済みの ChipSlot への参照を返すだけ。
@@ -132,7 +129,6 @@ struct FmEngineVtbl {
     decltype(&FmEngine_GetSupportedChip) GetSupportedChip = nullptr;
     decltype(&FmEngine_AddChip)          AddChip          = nullptr;
     decltype(&FmEngine_GetChipName)      GetChipName      = nullptr;
-    decltype(&FmEngine_GetNativeRate)    GetNativeRate    = nullptr;
     decltype(&FmEngine_GetSampleRate)    GetSampleRate    = nullptr;
     decltype(&FmEngine_Write)            Write            = nullptr;
     decltype(&FmEngine_SetGain)          SetGain          = nullptr;
@@ -156,7 +152,6 @@ static FmEngineVtbl load_vtbl(DllHandle h) {
     LOAD_SYM(v, h, GetSupportedChip);
     LOAD_SYM(v, h, AddChip);
     LOAD_SYM(v, h, GetChipName);
-    LOAD_SYM(v, h, GetNativeRate);
     LOAD_SYM(v, h, GetSampleRate);
     LOAD_SYM(v, h, Write);
     LOAD_SYM(v, h, SetGain);
@@ -449,6 +444,12 @@ private:
             uint32_t    clock     = chip_json.value("clock", 0u);
             int         panpot    = chip_json.value("pan",   0);
 
+            // clock=0 を AddChip に渡すとエンジンが標準クロックを選ぶが、FmEngineApi には
+            // その値を問い合わせる手段が無く、HWPlugin_GetClock で FITOM_X に実クロックを返せない
+            if (clock == 0)
+                throw std::runtime_error(
+                    "clock is required: chip=" + chip_name + " engine=" + dll_raw);
+
             uint32_t chip_id = 0;
             FmResult fr = inst->vtbl.AddChip(
                 inst->engine, chip_name.c_str(), clock, &chip_id);
@@ -459,16 +460,12 @@ private:
                 throw std::runtime_error(
                     "FmEngine_AddChip failed: chip=" + chip_name + " engine=" + dll_raw);
 
-            int actual_clock = clock
-                ? static_cast<int>(clock)
-                : static_cast<int>(inst->vtbl.GetNativeRate(inst->engine, chip_id));
-
             ChipSlot slot;
             slot.engine_dll_name = dll_raw;
             slot.chip_name       = chip_name;
             slot.index           = chip_idx_counter[chip_name]++;
             slot.chip_id         = chip_id;
-            slot.clock           = actual_clock;
+            slot.clock           = static_cast<int>(clock);
             slot.panpot          = panpot;
 
             apply_panpot(*inst, slot);

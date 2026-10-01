@@ -71,3 +71,18 @@ JSON フォーマット、PCM/ADPCM カタログ、ライフサイクル等）�
    `FitomHwIF::PcmCatalog::load()` と同じ規則（`is_absolute() ? そのまま : catalog_dir / path`）
    に統一し、`load_engine()`/`apply_pcm_images()` にカタログディレクトリを引き回すように
    変更した。README.md・`pcm_images.catalog.example.json` の該当記述も修正済み。
+7. **プロファイルの `clock` は必須。省略・0 は `HWPlugin_Init` の失敗にする**（2026年10月1日）。
+   FITOM_X は `HWPlugin_GetClock` をチップの実マスタークロックとして使い、PSG のトーン周期や
+   ADPCM の DeltaN を計算する。`FmEngine_AddChip` に 0 を渡すとエンジンが標準クロックを
+   選ぶが、FmEngineApi にはその値を問い合わせる手段が無い。旧実装は代わりに
+   `FmEngine_GetNativeRate`（サンプルレート）を返しており、FITOM_X に誤った値が渡っていた。
+   標準クロックは代表値に過ぎず、FITOM_X 本体が clock=0 でインスタンスを作ることも無い。
+   `GetNativeRate` は使わなくなったので、必須シンボルからも外した。
+   前提：FmEngineApi に、エンジンが選んだクロックを返す API が無いこと。
+   見送った案：
+   - FitomEmuIF に標準クロックの表を持たせる。理由：エンジン側の表と食い違っていく
+   - YMEngine に `FmEngine_GetClock` を足す。理由：FitomEmuIF が頼るには全エンジン DLL に
+     同じ API が要る。標準クロックを使う運用も無い
+   エラー時の戻り値は、他のプロファイル内容のエラー（`chip` 欠落、未知のチップ名）と同じ
+   `HW_ERR_OPEN_FAILED`。`IHWPlugin.h` はプロファイル解析失敗を `HW_ERR_INVALID_ARG` と
+   定めており、この食い違いは本変更より前からある。
