@@ -40,8 +40,7 @@ PCM/ADPCM カタログ、ライフサイクル等）は README.md を参照。
 2. **FitomIFTest (`fitom_hw.dll`) 側の `HWPlugin_Init`/`HWPlugin_Shutdown` 対応状況が未確認**
    （`plugin-hwif.md` の要件は物理HW側にも同じ `IHWPlugin.h` 実装を求めている）。
 3. **音声出力は未検証**。2026年10月1日に、VS2026（toolset v145、MSVC 19.51）と実 RtAudio
-   （WASAPI のみ有効。submodule の記録 e5f0774 ではなく、作業ツリーにあった c0a533d）で
-   Release ビルドが通った。実エンジン DLL（YMEngine の `YMFMEngine.dll`）を使って、
+   （c0a533d、WASAPI のみ有効）で Release ビルドが通った。実エンジン DLL（YMEngine の `YMFMEngine.dll`）を使って、
    `HWPlugin_Init`（オーディオストリームの起動を含む）→ `Open` → `GetClock` が動くことも
    確認した。音が出るか、正しく鳴るかは聴いていない。Linux/macOS の実機ビルドもしていない。
 4. **部位ごとのゲイン調整を中継するインターフェースを後で実装する**。YMEngine に
@@ -70,6 +69,16 @@ PCM/ADPCM カタログ、ライフサイクル等）は README.md を参照。
 7. **`HWPlugin_Init` のエラー戻り値が `IHWPlugin.h` の定めと食い違う**。プロファイル内容の
    エラーも `HW_ERR_OPEN_FAILED` を返すが、`IHWPlugin.h` はプロファイル解析失敗を
    `HW_ERR_INVALID_ARG` と定めている（設計判断 7）。
+8. **`audio_api` の `asio` / `ds` が既定のビルドでは使えない**。README.md と
+   `fmemuif_profile.example.json` は指定できる値として載せているが、RtAudio の
+   `RTAUDIO_API_ASIO` / `RTAUDIO_API_DS` は既定で OFF で、FitomEmuIF の CMakeLists.txt も
+   ON にしていない。RtAudio のコンストラクタ（`RtAudio.cpp` の `RtAudio::RtAudio`）は、指定した
+   API が組み込まれていないと標準エラーに警告を出し、組み込まれた API（Windows では WASAPI）に
+   切り替える。FitomEmuIF はエラーコールバックを渡していないので、警告は FITOM_X 側から
+   見えにくい。コードを読んだ見立てで、走らせてはいない。
+   対処案：README にビルドオプションが要ることを書く、または指定した API が
+   `RtAudio::getCompiledApi` に無ければ Init を失敗させる。後者は外から見える挙動の変更。
+   ASIO を有効にするなら、RtAudio は c0a533d 以降が要る（作業記録「RtAudio を c0a533d に更新」）。
 
 ## 設計判断の経緯（再度議論が必要な場合の背景）
 
@@ -137,3 +146,22 @@ PCM/ADPCM カタログ、ライフサイクル等）は README.md を参照。
   1回あたり最大約2ms遅れて適用される。この遅れは `HWPlugin_GetLatencySamples`
   （`buffer_frames`）に含まれない。FitomEmuIF 側での扱いは検討していない。
 - 副次的に見つけた既存の課題：TODO 5（`HWPlugin_Reset` の prescale）、TODO 6、TODO 7。
+
+### 2026年10月1日 RtAudio を e5f0774 から c0a533d に更新
+
+どちらも 6.0.1 より後のタグなしコミット（6.0.1-72 と 6.0.1-83）。間の変更と影響
+（差分を読んで判断。新旧で動かし比べてはいない）：
+
+- #486 ASIO の `bufferSwitchTimeInfo` コールバックを NULL のままにしない。NULL だと、
+  それを呼ぶドライバでプロセスが落ちる（上流のコミットメッセージによる。こちらでは
+  試していない）。ASIO を組み込んだビルドでだけ効く。今のビルドは `RTAUDIO_API_ASIO=OFF`
+- #474 PulseAudio のコードの変数名変更（GCC `-Wshadow` 対策）。挙動は変わらない
+- #482 CMake オプション `RTAUDIO_INSTALL`（既定 ON で従来と同じ）
+- #484 テストの DLL コピー（`RTAUDIO_BUILD_TESTING=OFF` なので無関係）
+- #487 pkg-config の pthread フラグ（`rtaudio.pc` のみ。インストール時だけ関係）
+
+今のビルド構成では挙動に効く変更は無く、取り込みは必須ではなかった。それでも更新した
+理由：この日のビルドと Init の確認（TODO 3）は c0a533d で行っており、記録と確かめた版を
+揃えられる。ASIO を有効にするときに要る修正も入る。
+前提：ASIO を組み込まない限り、e5f0774 と挙動は同じ。
+見送った案：記録どおり e5f0774 に戻す。理由：挙動は同じで、確かめた版と記録がずれる。
