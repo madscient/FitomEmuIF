@@ -34,15 +34,13 @@ PCM/ADPCM カタログ、ライフサイクル等）は README.md を参照。
 
 ## 未解決の TODO / 既知の課題
 
-1. **`src/fitom/IHWPlugin.h` の同期問題（未解消）**
-   FITOM_X の `plugin_sdk/include/fitom/IHWPlugin.h` と内容を同一に保つ必要があるが、
-   現状は独立コピーとして手動管理している（`FmEmuIfImpl.cpp` の `#include` 直後に
-   TODO コメントあり）。`HWPlugin_Shutdown` 追加時もこちらへ手動追記した。
-   FITOM_X 側にも同じ変更が反映されているか要確認。対処案: FITOM_X の `plugin_sdk` を
-   submodule 化する、または CI で diff チェックする。
-   2026年10月3日の状態（FITOM_X `29b2c31` と、コメントと空行を除いて diff。確認済み）：
-   `HWPlugin_Shutdown` は FITOM_X 側にも宣言がある（置き場所とコメントの文面は違う）。
-   宣言の違いは、こちらに足した部位ゲインの 4 関数だけ（TODO 4）。
+1. **`src/fitom/IHWPlugin.h` を正本と同一に保つ仕組みが無い**
+   FITOM_X の `plugin_sdk/include/fitom/IHWPlugin.h`（正本）の写しを、手動で管理している
+   （`FmEmuIfImpl.cpp` の `#include` 直後に TODO コメントあり）。
+   2026年10月4日に、写しを FITOM_X `4ab7a56` の正本と同一にした（改行の違いを除いて
+   diff で一致。確認済み）。正本が変わったら、写しをまるごと差し替える。
+   対処案: FITOM_X の `plugin_sdk` を submodule 化する、または CI で diff チェックする。
+   `src/fitom/FmEngineApi.h`（正本は FMEngineTest）にも同じ課題がある。
 2. **FitomIFTest (`fitom_hw.dll`) 側の `HWPlugin_Init`/`HWPlugin_Shutdown` 対応状況が未確認**
    （`plugin-hwif.md` の要件は物理HW側にも同じ `IHWPlugin.h` 実装を求めている）。
 3. **音声出力は未検証**。2026年10月1日に、VS2026（toolset v145、MSVC 19.51）と実 RtAudio
@@ -52,10 +50,11 @@ PCM/ADPCM カタログ、ライフサイクル等）は README.md を参照。
 4. **FmEngineApi の改訂（部位と外部メモリの名前指定）への追従の残り**。FitomEmuIF 側の
    実装は済んだ（設計判断 8・9、作業記録「FmEngineApi の改訂に追従し、部位ゲインの
    インターフェースを追加」）。残っているのは次のとおり。
-   - **FITOM_X の `IHWPlugin.h` に同じ宣言が要る**。`src/fitom/IHWPlugin.h` に
-     `HWPlugin_GetPartCount` / `GetPartName` / `SetPartGain` / `GetPartGain` を足したが、
-     正本（FITOM_X）には無い。FITOM_X 側で呼ぶコードもまだ無い（TODO 1 の同期問題に
-     差分が 1 つ増えた）。FITOM_X はこちらから編集しない
+   - **FITOM_X と実物の FitomEmuIF を組み合わせて動かしていない**。FITOM_X 側の対応は
+     `4ab7a56` で入った（正本の `IHWPlugin.h` の宣言、`HWPort` の中継、プロファイルの
+     `part_gains` への保存、GUI のスライダー）。宣言と契約が FitomEmuIF の実装と合うことは、
+     読んで突き合わせた（作業記録「FITOM_X の正本ヘッダとの突き合わせ」）。動かしたのは、
+     FITOM_X は検証用プラグイン、FitomEmuIF は検証用エンジンで、それぞれ別々にだけ
    - **SSGS / SSGS2 の外部メモリの名前が未定**。仕様書の表に無く、EPSGemuEngine が決める。
      決まるまで、カタログキー `SSGS_ADPCM` はどのメモリにも渡さない。決まったら
      `pcm_mappings_for_chip()` に 1 行、README の表に 1 行、`test/stub_engine.cpp` の SSGS の
@@ -146,17 +145,17 @@ PCM/ADPCM カタログ、ライフサイクル等）は README.md を参照。
    `HW_ERR_OPEN_FAILED`。`IHWPlugin.h` はプロファイル解析失敗を `HW_ERR_INVALID_ARG` と
    定めており、この食い違いは本変更より前からある。
    2026年10月3日の追記：FmEngineApi の仕様でも clock=0 は `FM_ERR_INVALID_ARG` になった
-   （FMEngineTest `866f4a3`）。この判断は仕様と同じ向きで、上の前提が変わっても成り立つ。
-   0 を標準クロックとして受け付けるエンジンが残っている（YMEngine `ac29207` のヘッダの
+   （FMEngineTest `a17c372`）。この判断は仕様と同じ向きで、上の前提が変わっても成り立つ。
+   0 を標準クロックとして受け付けるエンジンが残っている（YMEngine `89cbae1` のヘッダの
    記述による。走らせてはいない）ので、FitomEmuIF 側の検査は残す。
 8. **部位ごとのゲインの入口は、IHWPlugin の任意関数 4 本にする**（2026年10月3日）。
    `HWPlugin_GetPartCount` / `GetPartName` / `SetPartGain` / `GetPartGain`。FmEngineApi の
    部位ゲイン 4 関数の `(engine, chip_id)` を `HWHandle` に置き換えた形で、部位は名前の
    文字列で指定する。仕様は README.md「部位ごとのゲイン」。
    利用者と決めたこと：接頭辞を `HWPlugin_` にし、宣言を `src/fitom/IHWPlugin.h` に置く。
-   FITOM_X は、既存の任意関数（`GetLatencySamples` / `Shutdown`）と同じく `symOptional` で
-   探せる（`core/src/HWPort.cpp` の `HWPluginInstance::load()` を読んだ見立て。FITOM_X 側の
-   実装はまだ無い）。
+   FITOM_X は `HWPlugin_GetPartCount` を `symOptional` で探し、あれば残りの 3 つを必須として
+   読む（FITOM_X `4ab7a56` の `core/src/HWPort.cpp` の `HWPluginInstance::load()`。組の先頭が
+   あるのに残りが欠けるプラグインは、ロードに失敗する）。
    こちらで決めたこと（利用者と明示的には決めていない。変えるときは、該当する関数 1 か所と
    README の該当行、`test/engine_relay_test.cpp` の該当行で済む）：
    - 部位の一覧と既定値は、`HWPlugin_Init` の中（`FmEngine_AddChip` の直後）でエンジンから
@@ -173,18 +172,24 @@ PCM/ADPCM カタログ、ライフサイクル等）は README.md を参照。
    - 名前を返さない部位と、ゲインを読めない部位は控えに載せない（既定値が分からず、
      Close で戻せない）
    前提：
-   - FmEngineApi が部位を名前で指定すること（FMEngineTest `20c4923` の仕様）
+   - FmEngineApi が部位を名前で指定すること（FMEngineTest `0c22d67` の仕様）
    - 1 つのチップを同時に開けるハンドルが 1 つであること（`ChipSlot::in_use`）。Close で
      既定値に戻す扱いは、これに依る
    - `FmEngine_SetPartGain` を、別スレッドの `FmEngine_Write` と同時に呼んでよいかは、仕様書に
-     書かれていない（書かれているのはオーディオコールバックとの並行だけ）。FITOM_X が
-     どのスレッドから呼ぶかも決まっていない。README には仕様書にある範囲だけを書いた
+     書かれていない（書かれているのはオーディオコールバックとの並行だけ）。README には
+     仕様書にある範囲だけを書いた。
+     FITOM_X（`4ab7a56`）は、演奏中の `HWPlugin_SetPartGain` / `GetPartGain` を MIDI 処理・
+     タイマーと同じロックで直列化するので、`HWPlugin_Write` とは並行しない（FITOM_X の
+     `docs/plugin-hwif.md` による）。FITOM_X 以外のアプリケーションから呼ぶ場合には、
+     この未確定が残る
    見送った案：
    - FitomEmuIF 固有の拡張にする（`FmEmuIf_*` を別ヘッダに宣言）。理由：利用者が
      `HWPlugin_*` を選んだ。FITOM_X がエミュレーターと実機を区別しない方針からも外れる
    - プロファイルのキーで部位ゲインを設定する。理由：依頼はアプリケーション向けの
      インターフェース。キーは外に出る値なので、足すときに決める（足すだけなら互換は
-     壊れない）
+     壊れない）。その後、FITOM_X（`4ab7a56`）が自分のプロファイルの `part_gains` に保存し、
+     デバイスを開いた直後に適用するようになった（書式は FITOM_X の `docs/config-design.md`
+     「部位ごとのゲイン」）。FitomEmuIF 側のキーが要る場面は、今のところ無い
    - 部位の一覧を JSON 文字列で返す（`HWPlugin_Enumerate` と同じ流儀）。理由：FmEngineApi と
      同じ数え上げの形なら、FITOM_X 側に解析が要らない
    やり直しの値段：関数名を変える場合、FitomEmuIF 内は宣言・定義・README・テストの置換で
@@ -210,20 +215,48 @@ PCM/ADPCM カタログ、ライフサイクル等）は README.md を参照。
 
 ## 作業記録
 
+### 2026年10月4日 FITOM_X の正本ヘッダとの突き合わせ
+
+FITOM_X `4ab7a56` で、部位ごとのゲインが正本の `IHWPlugin.h` と FITOM_X 本体（`HWPort`、
+プロファイルの `part_gains`、GUI）に入った。こちらの写しと実装に合うかを確かめた。
+
+**確認済み**：
+
+- 宣言：コメントと空行を除いて diff すると、正本と写しは全関数で一致する
+- 写しを正本と同一にした（改行の違いを除いて diff で一致）。変わったのは、コメントと
+  `HWPlugin_Shutdown` の宣言の位置だけ。差し替えた後に再ビルドし、`ctest` の 5 件が通る
+  （VS2026、MSVC 19.51、x64、Release）
+
+読んで突き合わせたこと（FITOM_X と実物の FitomEmuIF を組み合わせて動かしてはいない。
+TODO 4）：
+
+- FITOM_X の `docs/plugin-hwif.md`「部位ごとのゲイン」の実装要件は、FitomEmuIF の実装
+  （設計判断 8）と一致する：名前の文字列は `HWPlugin_Close` まで有効、設定したゲインは
+  `HWPlugin_Close` で既定値に戻す、既定値は `HWPlugin_Open` の直後に読める、戻り値の条件
+- FITOM_X の呼び方（`HWPort` のコンストラクタで列挙と既定値の読み取り → `part_gains` の
+  適用 → 演奏中は GUI の操作から設定）は、`relay_current` が通している手順（Open → 列挙 →
+  既定値 → 設定 → Close → 開き直し）に含まれる
+- FITOM_X は `HWPlugin_GetPartCount` の有無で組を判定し、残りが欠けるプラグインをロード失敗に
+  する。FitomEmuIF は 4 関数ともエクスポートしている（10月3日に dumpbin で確認）
+- スレッド：設計判断 8 の前提に追記した
+
+この文書が参照する他リポジトリのコミットのハッシュは、各リポジトリの現行の履歴のものに
+直した。
+
 ### 2026年10月3日 FmEngineApi の改訂に追従し、部位ゲインのインターフェースを追加
 
 依頼：アプリケーションから部位ごとのゲインを調整できるインターフェースを提供する。
-FmEngineApi の改訂（FMEngineTest `20c4923`）で、部位と外部メモリを名前の文字列で指定し、
+FmEngineApi の改訂（FMEngineTest `0c22d67`）で、部位と外部メモリを名前の文字列で指定し、
 エンジンに列挙させる形になった。`FmPart` / `FmEngine_GetPartMask` / `FmMemoryType` /
 `FmEngine_GetMemorySize` は無くなり、外部メモリの関数は必須から任意の組に変わった。
 ヘッダの正本は YMEngine から FMEngineTest に移った。
 
-同じ日に、番号で指定する版（YMEngine `ac29207`）を前提に一度着手した。FmEngineApi が
+同じ日に、番号で指定する版（YMEngine `89cbae1`）を前提に一度着手した。FmEngineApi が
 さらに変わる予定だったので、利用者の判断で中止し、その時点の変更は戻した。
 
 変更：
 
-- `src/fitom/FmEngineApi.h`：FMEngineTest `20c4923` の `include/FmEngineApi.h` の写しに
+- `src/fitom/FmEngineApi.h`：FMEngineTest `0c22d67` の `include/FmEngineApi.h` の写しに
   差し替えた（改行の違いを除いて一致することを diff で確認済み）
 - `src/fitom/IHWPlugin.h`：部位ゲインの任意関数 4 本を足した（設計判断 8）
 - `src/FmEmuIfImpl.cpp`：`FmEngine_SetMemory` を必須シンボルから外し、任意の組を
@@ -281,10 +314,10 @@ FmEngineApi の改訂（FMEngineTest `20c4923`）で、部位と外部メモリ�
 - Linux / macOS でのビルドと実行。テストの `dlopen` の分岐と、検証用エンジンのファイル名
   （`lib` 接頭辞）の扱いは、コードを書いただけで動かしていない
 
-### 2026年10月1日 YMEngine 更新（d3e2969〜7fad830）の影響確認
+### 2026年10月1日 YMEngine 更新（b575a78〜26baa63）の影響確認
 
 対象は FitomEmuIF の前回コミット（2026年8月16日）より後の YMEngine の変更。確認時点の
-`src/fitom/FmEngineApi.h` は YMEngine の d0680be と同一だった（diff で確認済み）。
+`src/fitom/FmEngineApi.h` は YMEngine の d65c309 と同一だった（diff で確認済み）。
 
 - **API**：ヘッダの変更は追加のみ（`FmPart`、`FmEngine_SetPartGain` / `GetPartGain`）。
   既存関数のシグネチャと `.def` のエクスポートは変わっていない（diff で確認済み）。
@@ -300,7 +333,7 @@ FmEngineApi の改訂（FMEngineTest `20c4923`）で、部位と外部メモリ�
   FitomEmuIF 側の変更は不要。
 - **OPN 系の FM/SSG 分離**：既定の SSG 音量は据え置き（YMEngine 側の試験による。こちらでは
   測っていない）。部位ごとのゲインは TODO 4。
-- **d3e2969（キー衝突時の書き込み保留）**：同じチャンネルのキー状態が衝突した書き込みは、
+- **b575a78（キー衝突時の書き込み保留）**：同じチャンネルのキー状態が衝突した書き込みは、
   1回あたり最大約2ms遅れて適用される。この遅れは `HWPlugin_GetLatencySamples`
   （`buffer_frames`）に含まれない。FitomEmuIF 側での扱いは検討していない。
 - 副次的に見つけた既存の課題：TODO 5（`HWPlugin_Reset` の prescale）、TODO 6、TODO 7。

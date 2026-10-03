@@ -69,6 +69,28 @@ FITOM_HWP_API const char* FITOM_HWP_CALL HWPlugin_GetName();
 // 初期化前に他の関数を呼んだ場合の動作は未定義（実装は失敗を返すこと）。
 FITOM_HWP_API HWResult FITOM_HWP_CALL HWPlugin_Init(const char* profile_path);
 
+// プラグイン全体を安全に停止する(2026年7月新設、任意実装)。
+// HWPlugin_Init成功後、プロセス終了前にFITOM_X側が一度だけ呼ぶ。
+// オーディオストリーム等、プラグインが内部で保持するバックグラウンド
+// スレッドを、この関数呼び出しの中で同期的に停止・joinすること。
+//
+// 背景: HWPlugin_Closeは個別ハンドル単位の解放のみを行う契約であり、
+// プラグイン全体で共有するリソース(例: RtAudioストリームとその
+// コールバックスレッド)を止める手段が無かった。その結果、ストリームの
+// 停止がC++の静的デストラクタ実行(プロセス終了時、DLLアンロードと
+// 前後する暗黙のタイミング)任せになり、Windows環境でローダーロックに
+// 起因するデッドロック・フリーズを引き起こすことがある
+// (FreeLibrary/dlcloseがDLL内部のスレッド停止処理と競合するため)。
+//
+// この関数をエクスポートしないプラグインとの後方互換のため、FITOM_X側
+// はシンボルが見つからない場合は単に呼び出しをスキップする(GetProcAddress/
+// dlsymの結果がnullptrなら無視、詳細はHWPluginInstance::load()参照)。
+// 実装側は、この関数が呼ばれないまま(古いFITOM_X等から)プロセスが
+// 終了するケースにも耐えられるよう、static/global デストラクタでの
+// フォールバック停止処理自体は残しておくことを推奨する
+// (ただし通常経路ではこちらが先に呼ばれ、フォールバックには到達しない)。
+FITOM_HWP_API void FITOM_HWP_CALL HWPlugin_Shutdown();
+
 // ─── デバイス列挙 ────────────────────────────────────────────────────────────
 // 接続デバイスを JSON 文字列で返す (呼び出し元は HWPlugin_FreeString で解放)
 // 失敗時は nullptr
@@ -123,6 +145,8 @@ FITOM_HWP_API void FITOM_HWP_CALL HWPlugin_SetDelaySamples(
 // 4 関数は組でエクスポートする。FITOM は HWPlugin_GetPartCount の有無で判定し、
 // 無ければどれも呼ばず、どのデバイスも部位を持たないものとして扱う
 // （物理チップの hwif は実装しなくてよい）。
+// HWPlugin_GetPartCount があるのに残りが欠けているプラグインは、FITOM が
+// ロードに失敗させる。
 //
 // HWPlugin_GetPartCount:
 //   デバイスが持つ部位の数を返す。部位を持たないデバイスは 0。
@@ -144,20 +168,6 @@ FITOM_HWP_API HWResult    FITOM_HWP_CALL HWPlugin_SetPartGain(
     HWHandle handle, const char* part, float gain_l, float gain_r);
 FITOM_HWP_API HWResult    FITOM_HWP_CALL HWPlugin_GetPartGain(
     HWHandle handle, const char* part, float* out_gain_l, float* out_gain_r);
-
-// ─── プラグイン全体のシャットダウン（任意実装だが強く推奨）───────────────────
-// HWPlugin_Shutdown:
-//   プラグイン全体を安全に停止する。HWPlugin_Init が成功した後、
-//   FITOM_X がプロセスを終了する前に一度だけ呼ぶ（HWPlugin_Open/Close の
-//   呼び出し回数・順序とは独立）。
-//   この関数の中で、オーディオストリーム等のバックグラウンドリソースを
-//   同期的に（呼び出しから戻った時点で完全に停止・スレッドが join 済みの
-//   状態になるまで）停止すること。
-//   通常のメインスレッドのコンテキストで呼ばれる（DllMain の中ではない）。
-//   冪等性は不要（FITOM_X 側で二重呼び出しをガードする）。
-//   未実装でも動作する（FITOM_X は GetProcAddress/dlsym で探索し、
-//   見つからなければスキップする）。
-FITOM_HWP_API void FITOM_HWP_CALL HWPlugin_Shutdown();
 
 #ifdef __cplusplus
 }
