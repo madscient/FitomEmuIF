@@ -20,6 +20,10 @@
 //    プロファイル定義済みの ChipSlot への参照を返すだけ。
 //    エンジン本体・RtAudio ストリームは PluginRegistry が管理する。
 //
+//  [HWPlugin_GetPartCount / GetPartName / SetPartGain / GetPartGain]
+//    チップの部位（FM と SSG など、別々の端子から出る出力）ごとのゲインを
+//    FmEngine へ中継する。設定したゲインは Close で既定値に戻す。
+//
 // ─── プロファイル JSON (fmemuif_profile.json) ─────────────────────────────────
 //
 //  {
@@ -132,8 +136,17 @@ struct FmEngineVtbl {
     decltype(&FmEngine_GetSampleRate)    GetSampleRate    = nullptr;
     decltype(&FmEngine_Write)            Write            = nullptr;
     decltype(&FmEngine_SetGain)          SetGain          = nullptr;
-    decltype(&FmEngine_SetMemory)        SetMemory        = nullptr;
     decltype(&FmEngine_Generate)         Generate         = nullptr;
+
+    // FmEngineApi の任意の組。持たないエンジンでは組ごと nullptr のまま。
+    decltype(&FmEngine_GetPartCount)     GetPartCount     = nullptr;
+    decltype(&FmEngine_GetPartName)      GetPartName      = nullptr;
+    decltype(&FmEngine_SetPartGain)      SetPartGain      = nullptr;
+    decltype(&FmEngine_GetPartGain)      GetPartGain      = nullptr;
+
+    decltype(&FmEngine_GetMemoryCount)   GetMemoryCount   = nullptr;
+    decltype(&FmEngine_GetMemoryName)    GetMemoryName    = nullptr;
+    decltype(&FmEngine_SetMemory)        SetMemory        = nullptr;
 };
 
 #define LOAD_SYM(vtbl, dll, name) \
@@ -155,8 +168,23 @@ static FmEngineVtbl load_vtbl(DllHandle h) {
     LOAD_SYM(v, h, GetSampleRate);
     LOAD_SYM(v, h, Write);
     LOAD_SYM(v, h, SetGain);
-    LOAD_SYM(v, h, SetMemory);
     LOAD_SYM(v, h, Generate);
+
+    // 任意の組は、組の先頭 (GetPartCount / GetMemoryCount) の有無だけで判定する。
+    // 部位や外部メモリを番号で受け取る版の DLL も SetPartGain / SetMemory を同じ名前で
+    // エクスポートしており、その有無で判定すると名前のポインタを番号として渡してしまう。
+    // 先頭があるのに残りが欠けている DLL は、必須シンボルの欠落と同じくロード失敗にする。
+    if (dll_sym(h, "FmEngine_GetPartCount")) {
+        LOAD_SYM(v, h, GetPartCount);
+        LOAD_SYM(v, h, GetPartName);
+        LOAD_SYM(v, h, SetPartGain);
+        LOAD_SYM(v, h, GetPartGain);
+    }
+    if (dll_sym(h, "FmEngine_GetMemoryCount")) {
+        LOAD_SYM(v, h, GetMemoryCount);
+        LOAD_SYM(v, h, GetMemoryName);
+        LOAD_SYM(v, h, SetMemory);
+    }
     return v;
 }
 
@@ -195,6 +223,13 @@ static DllHandle load_engine_dll(const std::string& raw_name) {
 //  ChipSlot: エンジン内の 1 チップ分の設定と chip_id
 // ════════════════════════════════════════════════════════════════════════════
 
+struct ChipPart {
+    std::string name;
+    // FmEngine_AddChip 直後のゲイン。HWPlugin_Close で戻す先。
+    float       default_l = 1.f;
+    float       default_r = 1.f;
+};
+
 struct ChipSlot {
     std::string engine_dll_name; // プロファイル記載名（Enumerate 用）
     std::string chip_name;
@@ -203,6 +238,16 @@ struct ChipSlot {
     int         clock   = 0;     // 実クロック [Hz]
     int         panpot  = 0;     // 0=Stereo,1=L only,2=R only
     bool        in_use  = false;
+
+    // エンジンが報告した部位。部位を持たないチップと、部位ゲインの関数を
+    // 持たないエンジンのチップでは空。
+    std::vector<ChipPart> parts;
+
+    const ChipPart* find_part(const char* name) const {
+        for (const auto& p : parts)
+            if (p.name == name) return &p;
+        return nullptr;
+    }
 };
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -444,8 +489,10 @@ private:
             uint32_t    clock     = chip_json.value("clock", 0u);
             int         panpot    = chip_json.value("pan",   0);
 
-            // clock=0 を AddChip に渡すとエンジンが標準クロックを選ぶが、FmEngineApi には
-            // その値を問い合わせる手段が無く、HWPlugin_GetClock で FITOM_X に実クロックを返せない
+            // FmEngineApi は clock=0 を受け付けない（エンジンは既定のクロックを持たない）。
+            // 0 を標準クロックと解釈する版のエンジンもあるが、選ばれた値を問い合わせる手段が
+            // 無く、HWPlugin_GetClock で FITOM_X に実クロックを返せない。どちらの場合も
+            // ここで止め、どのチップの指定が欠けているかを伝える
             if (clock == 0)
                 throw std::runtime_error(
                     "clock is required: chip=" + chip_name + " engine=" + dll_raw);
@@ -467,6 +514,7 @@ private:
             slot.chip_id         = chip_id;
             slot.clock           = static_cast<int>(clock);
             slot.panpot          = panpot;
+            slot.parts           = query_parts(*inst, chip_id);
 
             apply_panpot(*inst, slot);
 
@@ -489,28 +537,44 @@ private:
         inst.vtbl.SetGain(inst.engine, slot.chip_id, l, r);
     }
 
+    // ── チップの部位をエンジンに問い合わせる ─────────────────────────────
+    // FmEngine_AddChip の直後に呼ぶ。ここで読んだゲインが、そのチップの既定値になる。
+    // 名前を返さない部位と、ゲインを読めない部位は載せない（既定値が分からず、
+    // HWPlugin_Close で戻せないため）。
+    static std::vector<ChipPart> query_parts(const EngineInstance& inst, uint32_t chip_id) {
+        std::vector<ChipPart> parts;
+        if (!inst.vtbl.GetPartCount) return parts;
+
+        const uint32_t n = inst.vtbl.GetPartCount(inst.engine, chip_id);
+        for (uint32_t i = 0; i < n; ++i) {
+            const char* name = inst.vtbl.GetPartName(inst.engine, chip_id, i);
+            if (!name) continue;
+
+            ChipPart part;
+            part.name = name;
+            if (inst.vtbl.GetPartGain(inst.engine, chip_id, name,
+                                      &part.default_l, &part.default_r) != FM_OK)
+                continue;
+            parts.push_back(std::move(part));
+        }
+        return parts;
+    }
+
     // ── PCM/ADPCM メモリイメージをチップに設定 ───────────────────────────
     //
-    // チップ名 → 使用するカタログキーと FmMemoryType の対応:
+    // エンジンにチップの外部メモリを問い合わせ、pcm_mappings_for_chip() で
+    // カタログキーが決まるメモリにイメージを渡す。外部メモリの関数を持たない
+    // エンジンは、外部メモリを持たないものとして扱う。
     //
-    //  チップ                   カタログキー          FmMemoryType
-    //  ─────────────────────────────────────────────────────────────
-    //  OPNA (YM2608)            ADPCM-B               FM_MEM_ADPCM_B
-    //                           OPNA_RHYTHM           FM_MEM_ADPCM_A  (リズムROM)
-    //  OPNB / OPNBB (YM2610/B)  ADPCM-A               FM_MEM_ADPCM_A
-    //                           OPNB_ADPCM-B          FM_MEM_ADPCM_B
-    //  Y8950                    ADPCM-B               FM_MEM_ADPCM_B
-    //  OPL4 (YMF278)            OPL4AWM               FM_MEM_PCM
-    //  SSGS / SSGS2 (YMZ705/YMZ732)  SSGS_ADPCM       FM_MEM_PCM
-    //
-    // カタログにエントリがない種別はスキップする（エラーにしない）。
+    // 対応表に無いメモリと、カタログにエントリが無いメモリには何も渡さない
+    // （エラーにしない）。OPNA / Y8950 の ADPCM_B_ROMMODE は、対応する
+    // カタログキーが無いので表に載せていない。
     // イメージデータは inst.pcm_images に所有させ、エンジンと同寿命にする。
     //
     // images[] の値（イメージファイルへのパス）は、絶対パスならそのまま、
     // 相対パスならカタログファイル自身のディレクトリを基準に解決する
-    // （FitomHwIF の PcmCatalog::load() と同じ規則に統一。2026年7月〜。
-    //  旧実装はここを実行時カレントディレクトリ基点で解決しており、
-    //  hwif/emuif 間でカタログの可搬性が無かった）。
+    // （FitomHwIF の PcmCatalog::load() と同じ規則。同じカタログファイルを
+    //  hwif と emuif の両方から参照できるようにするため）。
     //
     // ファイルが開けない・読み込めない・FmEngine_SetMemory が失敗する等の
     // 場合もエラーにはせず、該当ケーパビリティ（このカタログキー）を静かに
@@ -519,8 +583,10 @@ private:
     // 注: FmEngine_SetMemory はオーディオストリーム開始前に呼ぶこと（仕様）。
     //     load_engine() → apply_pcm_images() → start_audio() の順を守る。
 
-    // チップ名 → (カタログキー, FmMemoryType) のリストを返す
-    struct PcmMapping { const char* catalog_key; FmMemoryType mem_type; };
+    // チップ名 → (エンジンの外部メモリ名, カタログキー) のリストを返す。
+    // メモリ名はチップごとに独立だが、カタログキーはカタログ全体で一意なので、
+    // 同じ ADPCM_B でも OPNB 系は別のキーになる。
+    struct PcmMapping { const char* memory; const char* catalog_key; };
     static std::vector<PcmMapping> pcm_mappings_for_chip(const std::string& chip_name) {
         // 大文字小文字を区別しない比較
         auto ieq = [&](const char* s) {
@@ -532,23 +598,20 @@ private:
         };
 
         if (ieq("OPNA") || ieq("YM2608"))
-            return { {"ADPCM-B",     FM_MEM_ADPCM_B},
-                     {"OPNA_RHYTHM", FM_MEM_ADPCM_A} };
+            return { {"ADPCM_B", "ADPCM-B"},
+                     {"RHYTHM",  "OPNA_RHYTHM"} };
 
         if (ieq("OPNB") || ieq("YM2610") || ieq("OPNBB") || ieq("YM2610B"))
-            return { {"ADPCM-A",      FM_MEM_ADPCM_A},
-                     {"OPNB_ADPCM-B", FM_MEM_ADPCM_B} };
+            return { {"ADPCM_A", "ADPCM-A"},
+                     {"ADPCM_B", "OPNB_ADPCM-B"} };
 
         if (ieq("Y8950"))
-            return { {"ADPCM-B", FM_MEM_ADPCM_B} };
+            return { {"ADPCM_B", "ADPCM-B"} };
 
         if (ieq("OPL4") || ieq("YMF278"))
-            return { {"OPL4AWM", FM_MEM_PCM} };
+            return { {"PCM", "OPL4AWM"} };
 
-        if (ieq("SSGS") || ieq("YMZ705") || ieq("SSGS2") || ieq("YMZ732"))
-            return { {"SSGS_ADPCM", FM_MEM_PCM} };
-
-        return {}; // PCM メモリを持たないチップ
+        return {}; // イメージを渡す外部メモリが無いチップ
     }
 
     static void apply_pcm_images(EngineInstance& inst,
@@ -556,6 +619,8 @@ private:
                                   const json& catalog,
                                   const fs::path& catalog_dir)
     {
+        if (!inst.vtbl.GetMemoryCount) return;
+
         auto mappings = pcm_mappings_for_chip(slot.chip_name);
         if (mappings.empty()) return;
 
@@ -563,9 +628,18 @@ private:
         if (images_it == catalog.end()) return;
         const json& images = *images_it;
 
-        for (const auto& m : mappings) {
+        const uint32_t n = inst.vtbl.GetMemoryCount(inst.engine, slot.chip_id);
+        for (uint32_t i = 0; i < n; ++i) {
+            const char* memory = inst.vtbl.GetMemoryName(inst.engine, slot.chip_id, i);
+            if (!memory) continue;
+
+            auto found = std::find_if(mappings.begin(), mappings.end(),
+                [&](const PcmMapping& x) { return std::strcmp(x.memory, memory) == 0; });
+            if (found == mappings.end()) continue; // カタログキーを割り当てていないメモリ
+            const PcmMapping& m = *found;
+
             auto entry = images.find(m.catalog_key);
-            if (entry == images.end()) continue; // このチップのエントリなし → スキップ
+            if (entry == images.end()) continue; // カタログにエントリなし → スキップ
 
             try {
                 fs::path raw_path(entry->get<std::string>());
@@ -596,7 +670,7 @@ private:
                 const auto& image = inst.pcm_images.at(m.catalog_key);
                 FmResult fr = inst.vtbl.SetMemory(
                     inst.engine, slot.chip_id,
-                    m.mem_type,
+                    memory,
                     image.data(),
                     static_cast<uint32_t>(image.size()));
                 if (fr != FM_OK)
@@ -724,6 +798,7 @@ struct HWDeviceOpaque {
     ChipSlot*       slot           = nullptr;
     int             panpot_override = -1; // -1 = プロファイル値を使う
     bool            is_open        = false;
+    bool            part_gain_set  = false; // HWPlugin_SetPartGain が成功したか
 };
 
 static int effective_panpot(const HWDeviceOpaque* dev) {
@@ -849,6 +924,12 @@ FITOM_HWP_API void FITOM_HWP_CALL HWPlugin_Close(HWHandle handle) {
         else if (slot.panpot == 2) l = 0.f;
         inst.vtbl.SetGain(inst.engine, slot.chip_id, l, r);
     }
+    // 部位ゲインも同じく、次に Open する側へ持ち越さない
+    if (handle->part_gain_set) {
+        for (const auto& part : slot.parts)
+            inst.vtbl.SetPartGain(inst.engine, slot.chip_id, part.name.c_str(),
+                                  part.default_l, part.default_r);
+    }
     handle->is_open = false;
     slot.in_use     = false;
     delete handle;
@@ -914,6 +995,58 @@ FITOM_HWP_API int FITOM_HWP_CALL HWPlugin_GetPanpot(HWHandle handle) {
 }
 FITOM_HWP_API bool FITOM_HWP_CALL HWPlugin_IsOpen(HWHandle handle) {
     return handle && handle->is_open;
+}
+
+// ── 部位ごとのゲイン ─────────────────────────────────────────────────────────
+// FmEngine の部位ゲインを HWHandle 単位で中継する。部位の一覧と名前は
+// HWPlugin_Init の時点でエンジンから読んだものを返す。
+
+FITOM_HWP_API uint32_t FITOM_HWP_CALL HWPlugin_GetPartCount(HWHandle handle) {
+    if (!handle) return 0;
+    return static_cast<uint32_t>(handle->slot->parts.size());
+}
+
+FITOM_HWP_API const char* FITOM_HWP_CALL HWPlugin_GetPartName(
+    HWHandle handle, uint32_t index)
+{
+    if (!handle) return nullptr;
+    const auto& parts = handle->slot->parts;
+    return (index < parts.size()) ? parts[index].name.c_str() : nullptr;
+}
+
+// parts に載っている名前だけをエンジンへ通す。部位ゲインの関数を持たない
+// エンジンでは parts が空なので、vtbl の nullptr を呼ぶことはない。
+
+FITOM_HWP_API HWResult FITOM_HWP_CALL HWPlugin_SetPartGain(
+    HWHandle handle, const char* part, float gain_l, float gain_r)
+{
+    if (!handle || !part) return HW_ERR_INVALID_ARG;
+    if (!handle->is_open) return HW_ERR_IO;
+    if (!handle->slot->find_part(part)) return HW_ERR_INVALID_ARG;
+
+    auto& inst = *handle->engine_inst;
+    FmResult fr = inst.vtbl.SetPartGain(
+        inst.engine, handle->slot->chip_id, part, gain_l, gain_r);
+    if (fr != FM_OK)
+        return (fr == FM_ERR_INVALID_ARG) ? HW_ERR_INVALID_ARG : HW_ERR_IO;
+
+    handle->part_gain_set = true;
+    return HW_OK;
+}
+
+FITOM_HWP_API HWResult FITOM_HWP_CALL HWPlugin_GetPartGain(
+    HWHandle handle, const char* part, float* out_gain_l, float* out_gain_r)
+{
+    if (!handle || !part || !out_gain_l || !out_gain_r) return HW_ERR_INVALID_ARG;
+    if (!handle->is_open) return HW_ERR_IO;
+    if (!handle->slot->find_part(part)) return HW_ERR_INVALID_ARG;
+
+    auto& inst = *handle->engine_inst;
+    FmResult fr = inst.vtbl.GetPartGain(
+        inst.engine, handle->slot->chip_id, part, out_gain_l, out_gain_r);
+    if (fr != FM_OK)
+        return (fr == FM_ERR_INVALID_ARG) ? HW_ERR_INVALID_ARG : HW_ERR_IO;
+    return HW_OK;
 }
 
 // ── レイテンシ同期 ────────────────────────────────────────────────────────────

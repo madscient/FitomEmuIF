@@ -21,8 +21,11 @@ PCM/ADPCM カタログ、ライフサイクル等）は README.md を参照。
 - `../FITOM_X` — FITOM_X 本体。`plugin_sdk/include/fitom/IHWPlugin.h` が正本、
   `config_schema/pcm_image_catalog.schema.json` が PCM カタログの正式スキーマ、
   `docs/plugin-hwif.md` が hwif プラグイン仕様書。
-- `../YMEngine` — `FmEngineApi.h` の正本（`src/fitom/FmEngineApi.h` はそのコピー）。
-  変更の経緯は `doc/CHANGELOG.md`。
+- `../FMEngineTest` — FmEngineApi の仕様書（`docs/FmEngineApi.md`）と C ヘッダの正本
+  （`include/FmEngineApi.h`）。`src/fitom/FmEngineApi.h` はその写しで、直接編集しない。
+  仕様の変更の経緯と、各エンジン・アプリケーションに要る対応は `docs/CHANGELOG.md`。
+- `../YMEngine` — エンジン DLL のひとつ（`YMFMEngine.dll`）。変更の経緯は `doc/CHANGELOG.md`。
+  2026年10月3日までは、ここの `src/FmEngineApi.h` がヘッダの正本だった。
 - `../FitomHwIF` — 物理 HW 側の hwif。PCM カタログのパス解決規則をこちらと揃えている
   （設計判断 6）。
 - `../FitomIFTest` — `fitom_hw.dll`（TODO 2）。
@@ -37,21 +40,36 @@ PCM/ADPCM カタログ、ライフサイクル等）は README.md を参照。
    TODO コメントあり）。`HWPlugin_Shutdown` 追加時もこちらへ手動追記した。
    FITOM_X 側にも同じ変更が反映されているか要確認。対処案: FITOM_X の `plugin_sdk` を
    submodule 化する、または CI で diff チェックする。
+   2026年10月3日の状態（FITOM_X `29b2c31` と、コメントと空行を除いて diff。確認済み）：
+   `HWPlugin_Shutdown` は FITOM_X 側にも宣言がある（置き場所とコメントの文面は違う）。
+   宣言の違いは、こちらに足した部位ゲインの 4 関数だけ（TODO 4）。
 2. **FitomIFTest (`fitom_hw.dll`) 側の `HWPlugin_Init`/`HWPlugin_Shutdown` 対応状況が未確認**
    （`plugin-hwif.md` の要件は物理HW側にも同じ `IHWPlugin.h` 実装を求めている）。
 3. **音声出力は未検証**。2026年10月1日に、VS2026（toolset v145、MSVC 19.51）と実 RtAudio
    （c0a533d、WASAPI のみ有効）で Release ビルドが通った。実エンジン DLL（YMEngine の `YMFMEngine.dll`）を使って、
    `HWPlugin_Init`（オーディオストリームの起動を含む）→ `Open` → `GetClock` が動くことも
    確認した。音が出るか、正しく鳴るかは聴いていない。Linux/macOS の実機ビルドもしていない。
-4. **部位ごとのゲイン調整を中継するインターフェースを後で実装する**。YMEngine に
-   `FmEngine_SetPartGain` / `FmEngine_GetPartGain` が追加された（`FM_PART_FM` と
-   `FM_PART_SSG`。SSG は OPN/OPNA/OPNB/OPNBB）。実機では FM と SSG の出力をボード上の回路で
-   ミックスするので、音量バランスは機種で違う。これを FitomEmuIF から設定できるようにする。
-   - 未定：設定の入口（プロファイルのキーか、FITOM_X から呼ぶ IHWPlugin の関数か）。
-     どちらも外から見える値なので、実装前に決める
-   - 他のエンジン DLL はこの関数を持たないことがある。`LOAD_SYM`（見つからないと例外）
-     ではなく、任意のシンボルとして読む
-   - `src/fitom/FmEngineApi.h` は追加前の版のままなので、YMEngine の最新版に同期する
+4. **FmEngineApi の改訂（部位と外部メモリの名前指定）への追従の残り**。FitomEmuIF 側の
+   実装は済んだ（設計判断 8・9、作業記録「FmEngineApi の改訂に追従し、部位ゲインの
+   インターフェースを追加」）。残っているのは次のとおり。
+   - **FITOM_X の `IHWPlugin.h` に同じ宣言が要る**。`src/fitom/IHWPlugin.h` に
+     `HWPlugin_GetPartCount` / `GetPartName` / `SetPartGain` / `GetPartGain` を足したが、
+     正本（FITOM_X）には無い。FITOM_X 側で呼ぶコードもまだ無い（TODO 1 の同期問題に
+     差分が 1 つ増えた）。FITOM_X はこちらから編集しない
+   - **SSGS / SSGS2 の外部メモリの名前が未定**。仕様書の表に無く、EPSGemuEngine が決める。
+     決まるまで、カタログキー `SSGS_ADPCM` はどのメモリにも渡さない。決まったら
+     `pcm_mappings_for_chip()` に 1 行、README の表に 1 行、`test/stub_engine.cpp` の SSGS の
+     メモリ名と `test/engine_relay_test.cpp` の件数（8 件）を直す
+   - **新しい形を実装した実エンジンでは走らせていない**。2026年10月3日の時点で、追従を
+     終えたエンジンが無い。確かめたのは検証用エンジン（`test/stub_engine.cpp`）と、
+     改訂前の実エンジンまで。追従したエンジンが出たら、`relay_current` の内容を実エンジンで
+     確かめる（部位の名前・既定値と、ROM が音に反映されること）
+   - **追従していないエンジンには ROM が渡らない**。`FmEngine_GetMemoryCount` を持たない
+     DLL は外部メモリを持たないものとして扱うので、追従するまで ADPCM・リズム・AWM は
+     鳴らない（仕様側の前提。FMEngineTest の CHANGELOG「外部メモリを名前で指定する」）
+   - **この変更より前にビルドした FitomEmuIF を、追従後のエンジンと組み合わせない**。
+     `FmEngine_SetMemory` に番号を渡し、エンジンはそれをポインタとして読む。FITOM_staging の
+     DLL を入れ替えるときは、FitomEmuIF をエンジンより先か同時に入れ替える
 5. **`HWPlugin_Reset` の後、OPN/OPNA の prescale が 2 になる（対応は未判断）**。
    `HWPlugin_Reset` は port 0/1 のレジスタ 0x00〜0xFF に順に 0 を書く。ymfm は 0x2D/0x2E/0x2F
    へのアドレス書き込みで prescale を 6→3→2 と切り替える（`ymfm_opn.cpp` の
@@ -63,9 +81,14 @@ PCM/ADPCM カタログ、ライフサイクル等）は README.md を参照。
    `HWPort::reset()` を能動的に呼ぶ箇所が無く（ポートラッパーの転送のみ）、core/src に
    0x2D〜0x2F を書く OPN ドライバも無かった。
    対処案：OPN 系ではループで 0x2D〜0x2F を飛ばす、または最後に 0x2D を書いて prescale 6 に戻す。
-6. **スモークテストのパスが CMakeLists.txt と合っていない**。`BUILD_FITOMEMUIF_TEST` の
-   `add_executable` は `src/smoke_test.cpp` を指すが、ファイルは `test/smoke_test.cpp` にある。
-   既定は OFF なので表に出ていない。ON にしたときに失敗するかは試していない（未検証）。
+6. **（解消、2026年10月3日）スモークテストのパスが CMakeLists.txt と合っていなかった**。
+   `add_executable` を `test/smoke_test.cpp` に直した。`BUILD_FITOMEMUIF_TEST=ON` で
+   ビルドでき、12 件が通る（確認済み。MSVC 19.51、x64、Release）。
+   あわせて見つけて直したこと：`smoke_test.cpp` は `assert` で判定するので、Release 構成では
+   `NDEBUG` で判定がすべて消えていた。テストのターゲットだけ `NDEBUG` を外した（exe が
+   `_wassert` を import していることを dumpbin で確認済み）。
+   残り：手順 4 の `HWPlugin_Init(nullptr)` は、既定の場所にプロファイルがあるかどうかで
+   結果が変わる。プロファイルがある環境では走らせていない。
 7. **`HWPlugin_Init` のエラー戻り値が `IHWPlugin.h` の定めと食い違う**。プロファイル内容の
    エラーも `HW_ERR_OPEN_FAILED` を返すが、`IHWPlugin.h` はプロファイル解析失敗を
    `HW_ERR_INVALID_ARG` と定めている（設計判断 7）。
@@ -122,8 +145,141 @@ PCM/ADPCM カタログ、ライフサイクル等）は README.md を参照。
    エラー時の戻り値は、他のプロファイル内容のエラー（`chip` 欠落、未知のチップ名）と同じ
    `HW_ERR_OPEN_FAILED`。`IHWPlugin.h` はプロファイル解析失敗を `HW_ERR_INVALID_ARG` と
    定めており、この食い違いは本変更より前からある。
+   2026年10月3日の追記：FmEngineApi の仕様でも clock=0 は `FM_ERR_INVALID_ARG` になった
+   （FMEngineTest `866f4a3`）。この判断は仕様と同じ向きで、上の前提が変わっても成り立つ。
+   0 を標準クロックとして受け付けるエンジンが残っている（YMEngine `ac29207` のヘッダの
+   記述による。走らせてはいない）ので、FitomEmuIF 側の検査は残す。
+8. **部位ごとのゲインの入口は、IHWPlugin の任意関数 4 本にする**（2026年10月3日）。
+   `HWPlugin_GetPartCount` / `GetPartName` / `SetPartGain` / `GetPartGain`。FmEngineApi の
+   部位ゲイン 4 関数の `(engine, chip_id)` を `HWHandle` に置き換えた形で、部位は名前の
+   文字列で指定する。仕様は README.md「部位ごとのゲイン」。
+   利用者と決めたこと：接頭辞を `HWPlugin_` にし、宣言を `src/fitom/IHWPlugin.h` に置く。
+   FITOM_X は、既存の任意関数（`GetLatencySamples` / `Shutdown`）と同じく `symOptional` で
+   探せる（`core/src/HWPort.cpp` の `HWPluginInstance::load()` を読んだ見立て。FITOM_X 側の
+   実装はまだ無い）。
+   こちらで決めたこと（利用者と明示的には決めていない。変えるときは、該当する関数 1 か所と
+   README の該当行、`test/engine_relay_test.cpp` の該当行で済む）：
+   - 部位の一覧と既定値は、`HWPlugin_Init` の中（`FmEngine_AddChip` の直後）でエンジンから
+     読んで `ChipSlot::parts` に控える。`HWPlugin_GetPartCount` / `GetPartName` は控えを返す
+   - `HWPlugin_GetPartName` の文字列は `HWPlugin_Close` まで有効と約束する（実際の寿命は
+     `PluginRegistry` と同じで、約束より長い）
+   - 設定したゲインは `HWPlugin_Close` で既定値に戻す。pan（設計判断 5）と同じ扱い。
+     `HWPlugin_SetPartGain` が 1 回でも成功したハンドルだけ、そのチップの全部位を戻す
+   - `HWPlugin_GetPartGain` は控えではなくエンジンに問い合わせる
+   - 控えに無い名前は、エンジンに通さず `HW_ERR_INVALID_ARG` を返す。部位ゲインの関数を
+     持たないエンジンでは控えが空なので、関数ポインタの有無を別に調べなくて済む
+   - エンジンが `FM_ERR_INVALID_ARG` を返したら `HW_ERR_INVALID_ARG`、それ以外の失敗は
+     `HW_ERR_IO`
+   - 名前を返さない部位と、ゲインを読めない部位は控えに載せない（既定値が分からず、
+     Close で戻せない）
+   前提：
+   - FmEngineApi が部位を名前で指定すること（FMEngineTest `20c4923` の仕様）
+   - 1 つのチップを同時に開けるハンドルが 1 つであること（`ChipSlot::in_use`）。Close で
+     既定値に戻す扱いは、これに依る
+   - `FmEngine_SetPartGain` を、別スレッドの `FmEngine_Write` と同時に呼んでよいかは、仕様書に
+     書かれていない（書かれているのはオーディオコールバックとの並行だけ）。FITOM_X が
+     どのスレッドから呼ぶかも決まっていない。README には仕様書にある範囲だけを書いた
+   見送った案：
+   - FitomEmuIF 固有の拡張にする（`FmEmuIf_*` を別ヘッダに宣言）。理由：利用者が
+     `HWPlugin_*` を選んだ。FITOM_X がエミュレーターと実機を区別しない方針からも外れる
+   - プロファイルのキーで部位ゲインを設定する。理由：依頼はアプリケーション向けの
+     インターフェース。キーは外に出る値なので、足すときに決める（足すだけなら互換は
+     壊れない）
+   - 部位の一覧を JSON 文字列で返す（`HWPlugin_Enumerate` と同じ流儀）。理由：FmEngineApi と
+     同じ数え上げの形なら、FITOM_X 側に解析が要らない
+   やり直しの値段：関数名を変える場合、FitomEmuIF 内は宣言・定義・README・テストの置換で
+   済む。FITOM_X が呼び始めた後は FITOM_X にも及ぶ。
+9. **FmEngineApi の任意の組は、組の先頭のシンボルの有無だけで判定する**（2026年10月3日）。
+   部位ごとのゲインは `FmEngine_GetPartCount`、外部メモリは `FmEngine_GetMemoryCount`。
+   判定の方法は仕様書が定めている。番号で指定する版の DLL も `FmEngine_SetPartGain` /
+   `FmEngine_SetMemory` を同じ名前でエクスポートしているので、その有無で判定すると、名前の
+   ポインタを番号として渡すことになる。
+   こちらで決めたこと：
+   - 組の先頭があるのに残りが欠けている DLL は、`HWPlugin_Init` を失敗にする
+     （`HW_ERR_OPEN_FAILED`。必須シンボルの欠落と同じ扱い）。外部メモリの組については、
+     FMEngineTest の `src/main.cpp` も同じ扱いにしている（FMEngineTest の CHANGELOG による）。
+     見送った案：欠けた組を無いものとして続行する。理由：仕様に合わない DLL が黙って通る
+   - 外部メモリは、エンジンに `FmEngine_GetMemoryCount` / `GetMemoryName` で列挙させ、
+     `pcm_mappings_for_chip()` の表（チップ、メモリの名前 → カタログキー）で引く。エンジンが
+     報告しなかったメモリには `FmEngine_SetMemory` を呼ばない
+   - OPNA / Y8950 の `ADPCM_B_ROMMODE` には何も渡さない。FITOM_X のカタログのスキーマ
+     （`config_schema/pcm_image_catalog.schema.json`）のキーは 6 個で、対応するものが無い
+     （スキーマを読んで確認済み）
+   利用者と決めたこと：SSGS / SSGS2 の行は表から外す（名前が未定。TODO 4）。
+   前提：FITOM_X のカタログのキーが今の 6 個であること。キーが増えたら表に行を足す。
 
 ## 作業記録
+
+### 2026年10月3日 FmEngineApi の改訂に追従し、部位ゲインのインターフェースを追加
+
+依頼：アプリケーションから部位ごとのゲインを調整できるインターフェースを提供する。
+FmEngineApi の改訂（FMEngineTest `20c4923`）で、部位と外部メモリを名前の文字列で指定し、
+エンジンに列挙させる形になった。`FmPart` / `FmEngine_GetPartMask` / `FmMemoryType` /
+`FmEngine_GetMemorySize` は無くなり、外部メモリの関数は必須から任意の組に変わった。
+ヘッダの正本は YMEngine から FMEngineTest に移った。
+
+同じ日に、番号で指定する版（YMEngine `ac29207`）を前提に一度着手した。FmEngineApi が
+さらに変わる予定だったので、利用者の判断で中止し、その時点の変更は戻した。
+
+変更：
+
+- `src/fitom/FmEngineApi.h`：FMEngineTest `20c4923` の `include/FmEngineApi.h` の写しに
+  差し替えた（改行の違いを除いて一致することを diff で確認済み）
+- `src/fitom/IHWPlugin.h`：部位ゲインの任意関数 4 本を足した（設計判断 8）
+- `src/FmEmuIfImpl.cpp`：`FmEngine_SetMemory` を必須シンボルから外し、任意の組を
+  組の先頭で判定して読む（設計判断 9）。部位の列挙と 4 関数の中継、`HWPlugin_Close` での
+  復帰。外部メモリは名前で渡す。SSGS / SSGS2 の行は外した
+- `test/stub_engine.cpp`・`test/engine_relay_test.cpp`：検証用エンジンと中継のテストを足した。
+  CMake は `BUILD_FITOMEMUIF_TEST=ON` で ctest に 5 件を登録する（TODO 6 のパスも直した）
+- README.md、`fmemuif_profile.example.json`、`pcm_images.catalog.example.json`
+
+**確認済み**（VS2026、MSVC 19.51、x64、Release、RtAudio は WASAPI。`ctest` で 5 件通過。
+判定数はテストの出力による）：
+
+- エクスポート（dumpbin）：`FitomEmuIF.dll` に 4 関数がある。検証用エンジンの 4 つの変種は、
+  意図したシンボルだけが違う（番号指定の版は `GetPartCount` / `GetPartName` /
+  `GetMemoryCount` / `GetMemoryName` を持たず `GetPartMask` / `GetMemorySize` を持つ。
+  欠落の 2 変種は `GetPartName` / `GetMemoryName` だけを欠く）
+- `relay_current`（現行の形の検証用エンジン、50 判定）：
+  - 外部メモリ：OPNA の `RHYTHM` に `OPNA_RHYTHM`、`ADPCM_B` に `ADPCM-B`、OPNB の
+    `ADPCM_A` に `ADPCM-A`、`ADPCM_B` に `OPNB_ADPCM-B`、OPL4 の `PCM` に `OPL4AWM`、Y8950 の
+    `ADPCM_B` に `ADPCM-B` のイメージが渡る（イメージごとに大きさと先頭・末尾のバイトを
+    変えて見分けた）。`FmEngine_SetMemory` の呼び出しは 8 件ちょうどで、`ADPCM_B_ROMMODE` と
+    SSGS のメモリには渡らない。エンジンがメモリを仕様書の表と逆順に返しても渡る（OPNB）
+  - 部位の列挙：OPNA は `FM` / `SSG`、OPL3 は `AB` / `CD`、OPL4 は `DO0` / `DO1` / `DO2`、
+    OPM は 0 個。既定値はエンジンの値が読める（OPL3 の `CD` は 0）
+  - 設定と読み戻し：設定した値がエンジンに届き、エンジンから読み戻せる。同じチップの
+    別の部位と、同種の別チップ（index 違い）の値は変わらない
+  - 引数の誤り：別チップの部位の名前、大文字小文字の違い、`nullptr`（handle / part /
+    出力先）は `HW_ERR_INVALID_ARG`。値は変わらない
+  - Close：設定したハンドルを閉じると、エンジンに既定値が書き戻される（OPL3 の `CD` は
+    1.0 ではなく 0 に戻る）。開き直すと既定値が読める。設定していないハンドルを閉じても、
+    部位ゲインは書かない
+- `relay_legacy`（番号指定の版の検証用エンジン、11 判定）：`HWPlugin_Init` が通り、部位は
+  0 個、`HWPlugin_SetPartGain` / `GetPartGain` は `HW_ERR_INVALID_ARG`。番号で受け取る版の
+  関数（`SetPartGain` / `GetPartGain` / `GetPartMask` / `SetMemory` / `GetMemorySize`）は
+  1 回も呼ばれない（カタログに OPNA のイメージを置いた状態で、呼び出しの記録が 0 件）。
+  対照：同じ記録に `AddChip` は残っており、テストから `FmEngine_SetMemory` を番号で直接
+  呼ぶと記録が 1 件になる
+- 同じ `legacy` を、改訂前の実エンジンで実行（7 判定）：`../YMEngine` の手元の
+  `YMFMEngine.dll`（2026年10月2日のビルド。`GetPartMask` があり `GetPartCount` が無いことを
+  dumpbin で確認。どのコミットからビルドされたかは確かめていない）で、`HWPlugin_Init`
+  （オーディオストリームの起動を含む）→ `Open`（OPNA）→ 部位 0 個 → `Write` → `Close` →
+  `Shutdown` が通る。実エンジンは記録を持たないので、関数が呼ばれていないことは
+  この実行では見ていない
+- `relay_no_part_name` / `relay_no_memory_name`：組の先頭があり残りを欠く DLL では、
+  `HWPlugin_Init` が `HW_ERR_OPEN_FAILED` を返す。対照：欠けていない検証用エンジンを同じ
+  モードに渡すと `HWPlugin_Init` が通り、テストは落ちる
+- `smoke`：12 件（TODO 6）
+
+**未検証**：
+
+- 新しい形を実装した実エンジンでの動作（TODO 4）。検証用エンジンは音を出さないので、
+  部位ゲインが出力の音量に効くこと、渡した ROM が音に反映されることは確かめていない
+- FITOM_X からの呼び出し（FITOM_X 側の実装が無い）
+- 再生中に別スレッドから `HWPlugin_SetPartGain` を呼ぶこと。テストは 1 スレッドから呼ぶ
+- Linux / macOS でのビルドと実行。テストの `dlopen` の分岐と、検証用エンジンのファイル名
+  （`lib` 接頭辞）の扱いは、コードを書いただけで動かしていない
 
 ### 2026年10月1日 YMEngine 更新（d3e2969〜7fad830）の影響確認
 

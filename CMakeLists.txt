@@ -146,14 +146,61 @@ install(TARGETS FitomEmuIF
 # ════════════════════════════════════════════════════════════════════════════
 #  テスト（オプション）
 # ════════════════════════════════════════════════════════════════════════════
-option(BUILD_FITOMEMUIF_TEST "Build smoke test" OFF)
+option(BUILD_FITOMEMUIF_TEST "Build tests" OFF)
 if(BUILD_FITOMEMUIF_TEST)
-    add_executable(FitomEmuIF_test src/smoke_test.cpp)
+    enable_testing()
+
+    # ── スモークテスト ───────────────────────────────────────────────────────
+    add_executable(FitomEmuIF_test test/smoke_test.cpp)
     target_include_directories(FitomEmuIF_test PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
     )
     target_link_libraries(FitomEmuIF_test PRIVATE FitomEmuIF)
+    # smoke_test.cpp は assert で判定する。Release 構成の NDEBUG を外さないと
+    # 判定がすべて消え、何も確かめないまま成功する。
     if(MSVC)
-        target_compile_options(FitomEmuIF_test PRIVATE /utf-8)
+        target_compile_options(FitomEmuIF_test PRIVATE /utf-8 /UNDEBUG)
+    else()
+        target_compile_options(FitomEmuIF_test PRIVATE -UNDEBUG)
     endif()
+    add_test(NAME smoke COMMAND FitomEmuIF_test)
+
+    # ── 検証用エンジン（test/stub_engine.cpp を定義で作り分ける）────────────
+    # FitomEmuIF はエンジン DLL を自分と同じディレクトリから探すので、出力先は変えない。
+    function(fitomemuif_add_stub_engine name)
+        add_library(${name} MODULE test/stub_engine.cpp)
+        target_include_directories(${name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+        target_compile_definitions(${name} PRIVATE ${ARGN})
+        if(MSVC)
+            target_compile_options(${name} PRIVATE /utf-8)
+        endif()
+    endfunction()
+    fitomemuif_add_stub_engine(StubEngine)
+    fitomemuif_add_stub_engine(StubEngineLegacy       STUB_LEGACY)
+    fitomemuif_add_stub_engine(StubEngineNoPartName   STUB_OMIT_GETPARTNAME)
+    fitomemuif_add_stub_engine(StubEngineNoMemoryName STUB_OMIT_GETMEMORYNAME)
+
+    # ── 部位ゲインと外部メモリの中継テスト ───────────────────────────────────
+    add_executable(FitomEmuIF_relay_test test/engine_relay_test.cpp)
+    target_include_directories(FitomEmuIF_relay_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_link_libraries(FitomEmuIF_relay_test PRIVATE FitomEmuIF)
+    if(MSVC)
+        target_compile_options(FitomEmuIF_relay_test PRIVATE /utf-8)
+    endif()
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(FitomEmuIF_relay_test PRIVATE dl)
+    endif()
+    add_dependencies(FitomEmuIF_relay_test
+        StubEngine StubEngineLegacy StubEngineNoPartName StubEngineNoMemoryName)
+
+    add_test(NAME relay_current
+        COMMAND FitomEmuIF_relay_test current $<TARGET_FILE:StubEngine>)
+    add_test(NAME relay_legacy
+        COMMAND FitomEmuIF_relay_test legacy $<TARGET_FILE:StubEngineLegacy>)
+    add_test(NAME relay_no_part_name
+        COMMAND FitomEmuIF_relay_test incomplete $<TARGET_FILE:StubEngineNoPartName>)
+    add_test(NAME relay_no_memory_name
+        COMMAND FitomEmuIF_relay_test incomplete $<TARGET_FILE:StubEngineNoMemoryName>)
 endif()
