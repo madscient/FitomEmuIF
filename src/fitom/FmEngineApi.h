@@ -84,11 +84,6 @@ FMENGINE_API FmResult FMENGINE_CALL FmEngine_AddChip(
 // =========================================================
 FMENGINE_API const char* FMENGINE_CALL FmEngine_GetChipName(
     FmEngineHandle engine, uint32_t chip_id);
-// ネイティブサンプルレート (Hz、端数切り捨て)。
-// FM と SSG を別のレートで生成するチップ (OPN 系) では FM 部のレート。
-// OPN/OPNA では prescale レジスタ (0x2D-0x2F) の書き込みで変わる。
-FMENGINE_API uint32_t    FMENGINE_CALL FmEngine_GetNativeRate(
-    FmEngineHandle engine, uint32_t chip_id);
 FMENGINE_API uint32_t    FMENGINE_CALL FmEngine_GetSampleRate(
     FmEngineHandle engine);
 

@@ -215,6 +215,26 @@ PCM/ADPCM カタログ、ライフサイクル等）は README.md を参照。
 
 ## 作業記録
 
+### 2026年10月4日 FmEngineApi.h の写しを更新（FmEngine_GetNativeRate の廃止）
+
+FmEngineApi から `FmEngine_GetNativeRate` が外れた（FMEngineTest `831947d`。必須シンボルは
+12 個から 11 個になった）。FMEngineTest の CHANGELOG が FitomEmuIF に求めている対応は、
+ヘッダの写しとテスト用の検証用エンジンを直すこと。
+
+- `src/fitom/FmEngineApi.h`：`831947d` の `include/FmEngineApi.h` の写しに差し替えた
+  （改行の違いを除いて diff で一致。確認済み）。宣言が 1 つ減っただけ
+- `test/stub_engine.cpp`：`FmEngine_GetNativeRate` の定義を外した
+
+FitomEmuIF 本体は、以前からこの関数を読んでいない（設計判断 7）。
+
+**確認済み**（VS2026、MSVC 19.51、x64、Release）：
+
+- 本体のソースに `GetNativeRate` の参照が無い（検索）
+- 再ビルドして `ctest` の 5 件が通る。検証用エンジンの 4 つの変種は、どれも
+  `FmEngine_GetNativeRate` をエクスポートしていない（dumpbin）
+- この関数をまだエクスポートしている実エンジン（10月3日の作業記録と同じ、改訂前の
+  `YMFMEngine.dll`）でも、`legacy` の 7 判定が通る
+
 ### 2026年10月4日 FITOM_X の正本ヘッダとの突き合わせ
 
 FITOM_X `4ab7a56` で、部位ごとのゲインが正本の `IHWPlugin.h` と FITOM_X 本体（`HWPort`、

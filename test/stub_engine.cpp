@@ -128,7 +128,7 @@ FMENGINE_API const char* FMENGINE_CALL StubEngine_GetLog() {
     return g_log.c_str();
 }
 
-// ── 必須の 12 関数 ───────────────────────────────────────────────────────────
+// ── 必須の 11 関数 ───────────────────────────────────────────────────────────
 
 FMENGINE_API FmEngineHandle FMENGINE_CALL FmEngine_Create(uint32_t sample_rate) {
     auto* engine = new FmEngineOpaque();
@@ -173,12 +173,6 @@ FMENGINE_API const char* FMENGINE_CALL FmEngine_GetChipName(
 {
     Chip* chip = find_chip(engine, chip_id);
     return chip ? chip->def->name : nullptr;
-}
-
-FMENGINE_API uint32_t FMENGINE_CALL FmEngine_GetNativeRate(
-    FmEngineHandle engine, uint32_t chip_id)
-{
-    return find_chip(engine, chip_id) ? engine->sample_rate : 0;
 }
 
 FMENGINE_API uint32_t FMENGINE_CALL FmEngine_GetSampleRate(FmEngineHandle engine) {
