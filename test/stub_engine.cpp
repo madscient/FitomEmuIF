@@ -53,17 +53,21 @@ struct ChipDef {
 };
 
 // 部位の名前と既定値、外部メモリの名前は FmEngineApi 仕様書の表に合わせた。
-// SSGS は仕様書の表に無いチップで、メモリの名前はこのエンジンが決めたもの。
+// SSGS 系と OPL2EX は仕様書の表に無いチップで、メモリの名前はそれぞれ
+// EPSGemuEngine と DSAemuEngine に合わせた。
 // OPNB のメモリを表と逆順に並べているのは、呼び出し側が並びに依らないことを見るため。
 const std::vector<ChipDef>& chip_defs() {
     static const std::vector<ChipDef> defs = {
-        { "OPNA",  { {"FM", 1.f}, {"SSG", 1.f} },                 { "RHYTHM", "ADPCM_B", "ADPCM_B_ROMMODE" } },
-        { "OPNB",  { {"FM", 1.f}, {"SSG", 1.f} },                 { "ADPCM_B", "ADPCM_A" } },
-        { "OPL3",  { {"AB", 1.f}, {"CD", 0.f} },                  {} },
-        { "OPL4",  { {"DO0", 0.f}, {"DO1", 0.f}, {"DO2", 1.f} },  { "PCM" } },
-        { "Y8950", {},                                            { "ADPCM_B", "ADPCM_B_ROMMODE" } },
-        { "SSGS",  {},                                            { "PCM" } },
-        { "OPM",   {},                                            {} },
+        { "OPNA",   { {"FM", 1.f}, {"SSG", 1.f} },                 { "RHYTHM", "ADPCM_B", "ADPCM_B_ROMMODE" } },
+        { "OPNB",   { {"FM", 1.f}, {"SSG", 1.f} },                 { "ADPCM_B", "ADPCM_A" } },
+        { "OPL3",   { {"AB", 1.f}, {"CD", 0.f} },                  {} },
+        { "OPL4",   { {"DO0", 0.f}, {"DO1", 0.f}, {"DO2", 1.f} },  { "PCM" } },
+        { "Y8950",  {},                                            { "ADPCM_B", "ADPCM_B_ROMMODE" } },
+        { "OPL2EX", {},                                            { "ADPCM_B" } },
+        { "SSGS",   {},                                            { "PCM" } },
+        { "SSGS2",  {},                                            { "PCM" } },
+        { "SSGS3",  {},                                            { "PCM" } },
+        { "OPM",    {},                                            {} },
     };
     return defs;
 }

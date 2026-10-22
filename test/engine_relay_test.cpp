@@ -168,7 +168,10 @@ static const char* const kCurrentChips =
     "    { \"chip\": \"Y8950\", \"clock\": 3579545 },\n"   // 4
     "    { \"chip\": \"SSGS\",  \"clock\": 4000000 },\n"   // 5
     "    { \"chip\": \"OPM\",   \"clock\": 3579545 },\n"   // 6
-    "    { \"chip\": \"OPNA\",  \"clock\": 7987200 }\n";   // 7
+    "    { \"chip\": \"OPNA\",  \"clock\": 7987200 },\n"   // 7
+    "    { \"chip\": \"OPL2EX\", \"clock\": 3579545 },\n"  // 8
+    "    { \"chip\": \"SSGS2\", \"clock\": 6000000 },\n"   // 9
+    "    { \"chip\": \"SSGS3\", \"clock\": 8000000 }\n";   // 10
 
 static void test_current(const fs::path& profile, const std::string& engine,
                          const char* (*get_log)())
@@ -191,9 +194,12 @@ static void test_current(const fs::path& profile, const std::string& engine,
         CHECK(has_line(log, "SetMemory chip=4 memory=ADPCM_B size=3 first=B0 last=B2"));
         CHECK(has_line(log, "SetMemory chip=7 memory=RHYTHM size=2 first=C0 last=C1"));
         CHECK(has_line(log, "SetMemory chip=7 memory=ADPCM_B size=3 first=B0 last=B2"));
-        // 上の 8 件のほかには渡していない（ADPCM_B_ROMMODE と SSGS のメモリを含む）
-        CHECK(count_prefix(log, "SetMemory ") == 8);
-        CHECK(count_prefix(log, "SetMemory chip=5 ") == 0);
+        CHECK(has_line(log, "SetMemory chip=5 memory=PCM size=7 first=F0 last=F6"));
+        CHECK(has_line(log, "SetMemory chip=8 memory=ADPCM_B size=3 first=B0 last=B2"));
+        CHECK(has_line(log, "SetMemory chip=9 memory=PCM size=7 first=F0 last=F6"));
+        // 上の 11 件のほかには渡していない（ADPCM_B_ROMMODE と SSGS3 のメモリを含む）
+        CHECK(count_prefix(log, "SetMemory ") == 11);
+        CHECK(count_prefix(log, "SetMemory chip=10 ") == 0);
         // Init の時点では部位ゲインを書かない
         CHECK(count_prefix(log, "SetPartGain ") == 0);
     }

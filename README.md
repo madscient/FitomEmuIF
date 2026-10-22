@@ -140,21 +140,22 @@ FitomEmuIF は `FmEngine_GetMemoryCount` / `FmEngine_GetMemoryName` でチップ
 | OPNB/OPNBB / YM2610/B | `ADPCM_A` | `ADPCM-A` |
 | OPNB/OPNBB / YM2610/B | `ADPCM_B` | `OPNB_ADPCM-B` |
 | Y8950 | `ADPCM_B` | `ADPCM-B` |
+| OPL2EX（Y8960 拡張 OPL2 部） | `ADPCM_B` | `ADPCM-B` |
 | OPL4 / YMF278 | `PCM` | `OPL4AWM` |
+| SSGS / SSGS2（YMZ705 / YMZ732） | `PCM` | `SSGS_ADPCM` |
 
 OPNB/OPNBB の ADPCM-B は OPNA/Y8950 とメモリのバウンダリ（アドレッシング境界）が異なるため、
 `ADPCM-B` を共有せず専用の `OPNB_ADPCM-B` キーを使う（FITOM_X スキーマの規約と同じ）。
+OPL2EX の ADPCM-B は Y8950 とメモリの配置が同じなので、`ADPCM-B` を共有する。
 
 次のメモリには何も渡さない（エラーにしない）:
 
 - エンジンが報告しなかったメモリ
-- 表に無いメモリ（OPNA / Y8950 の `ADPCM_B_ROMMODE` など）
+- 表に無いメモリ（OPNA / Y8950 の `ADPCM_B_ROMMODE`、SSGS3 の `PCM` など）
 - カタログにエントリが無いメモリ
 
 外部メモリの関数（`FmEngine_GetMemoryCount`）をエクスポートしないエンジンは、外部メモリを
 持たないものとして扱い、イメージを渡さない（「エンジン DLL」を参照）。
-
-カタログキー `SSGS_ADPCM` は、渡し先の外部メモリの名前が決まっていないため、使われない。
 
 同一エンジン内で同じチップ種別を複数回使う場合、イメージデータはカタログキー単位で
 一度だけ読み込まれ、`EngineInstance` 内でチップと同寿命のバッファとして共有される。

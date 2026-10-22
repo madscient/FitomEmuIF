@@ -29,6 +29,10 @@ PCM/ADPCM カタログ、ライフサイクル等）は README.md を参照。
 - `../FitomHwIF` — 物理 HW 側の hwif。PCM カタログのパス解決規則をこちらと揃えている
   （設計判断 6）。
 - `../FitomIFTest` — `fitom_hw.dll`（TODO 2）。
+- `../DSAemuEngine` — エンジン DLL のひとつ。Y8950 と Y8960 の各部（`OPL2EX` / `OPLLEX` /
+  `SSGEX` / `SCCEX`）。外部メモリの名前は README の表にある。
+- `../EPSGemuEngine` — エンジン DLL のひとつ。SSGS / SSGS2 / SSGS3 / AMMS-A / PCMD8。外部メモリの
+  名前はどれも `PCM`（`72f70d6`）。
 - `../FITOM_staging` — 運用プロファイル。FitomEmuIF 用は
   `config/profiles/hw_plugins/fmemuif_*.json`。
 
@@ -55,10 +59,6 @@ PCM/ADPCM カタログ、ライフサイクル等）は README.md を参照。
      `part_gains` への保存、GUI のスライダー）。宣言と契約が FitomEmuIF の実装と合うことは、
      読んで突き合わせた（作業記録「FITOM_X の正本ヘッダとの突き合わせ」）。動かしたのは、
      FITOM_X は検証用プラグイン、FitomEmuIF は検証用エンジンで、それぞれ別々にだけ
-   - **SSGS / SSGS2 の外部メモリの名前が未定**。仕様書の表に無く、EPSGemuEngine が決める。
-     決まるまで、カタログキー `SSGS_ADPCM` はどのメモリにも渡さない。決まったら
-     `pcm_mappings_for_chip()` に 1 行、README の表に 1 行、`test/stub_engine.cpp` の SSGS の
-     メモリ名と `test/engine_relay_test.cpp` の件数（8 件）を直す
    - **新しい形を実装した実エンジンでは走らせていない**。2026年10月3日の時点で、追従を
      終えたエンジンが無い。確かめたのは検証用エンジン（`test/stub_engine.cpp`）と、
      改訂前の実エンジンまで。追従したエンジンが出たら、`relay_current` の内容を実エンジンで
@@ -210,10 +210,60 @@ PCM/ADPCM カタログ、ライフサイクル等）は README.md を参照。
    - OPNA / Y8950 の `ADPCM_B_ROMMODE` には何も渡さない。FITOM_X のカタログのスキーマ
      （`config_schema/pcm_image_catalog.schema.json`）のキーは 6 個で、対応するものが無い
      （スキーマを読んで確認済み）
-   利用者と決めたこと：SSGS / SSGS2 の行は表から外す（名前が未定。TODO 4）。
-   前提：FITOM_X のカタログのキーが今の 6 個であること。キーが増えたら表に行を足す。
+   利用者と決めたこと：SSGS / SSGS2 の行は、名前が決まるまで表から外す。2026年10月23日に
+   EPSGemuEngine（`72f70d6`）で `PCM` に決まったので、`SSGS_ADPCM` を渡す行を戻した。
+   SSGS3 の `PCM` は AMM 部のメモリで、`SSGS_ADPCM`（YMZ705 / YMZ732 の ADPCM 部）とは別物
+   なので表に載せない。
+   前提：FITOM_X のカタログのキーが今の 6 個であること（FITOM_X `bdea8cf` でも 6 個。
+   スキーマを読んで確認）。キーが増えたら表に行を足す。
+10. **OPL2EX の `ADPCM_B` には、Y8950 と同じカタログキー `ADPCM-B` を渡す**（2026年10月23日、
+    利用者と決めた）。
+    根拠：FITOM_X（`bdea8cf`）は OPL2EX の ADPCM-B を、レジスタ配置もバウンダリ整列も Y8950 と
+    同一として扱い（`core/include/fitom/FITOMdefine.h` の `DEVICE_ADPCMB_OPL2EX`、
+    `config_schema/profile.schema.json`）、音色の種別も Y8950 と共用している。FITOM_X の
+    カタログのスキーマは `additionalProperties: false` で、OPL2EX 用のキーが無い。
+    前提：OPL2EX と Y8950 の ADPCM メモリの配置が同じであること。
+    見送った案：専用キー（`OPL2EX_ADPCM-B` など）を作る。理由：FITOM_X のスキーマにキーを
+    足さないとカタログがスキーマ違反になり、FITOM_X 側の定義（Y8950 と同一）とも合わない。
+    やり直しの値段：専用キーに変えるなら、`pcm_mappings_for_chip()` の文字列 1 か所、README の
+    表 1 行、`test/engine_relay_test.cpp` のイメージと判定。FITOM_X のスキーマと運用カタログ
+    （FITOM_staging）にもキーが要る。
 
 ## 作業記録
+
+### 2026年10月23日 OPL2EX と SSGS / SSGS2 の外部メモリにイメージを渡す
+
+依頼：`pcm_mappings_for_chip()` に OPL2EX の ADPCM-B の行が無く、イメージがエンジンへ
+渡らない。あわせて、SSGS の外部メモリの名前が EPSGemuEngine で `PCM` に決まった。
+
+作業前の状態：FitomEmuIF は origin/main と一致し、作業ツリーはクリーンだった。
+
+参照した他リポジトリ（いずれも origin/main。読んだだけで編集していない）：
+
+- DSAemuEngine `46c2fbe` の README：OPL2EX のメモリは `ADPCM_B`（RAM 256KB）、Y8950 は
+  `ADPCM_B` / `ADPCM_B_ROMMODE`。Y8960 の SSG 部はこのコミットで `SSGS` から `SSGEX` に
+  改名され、外部メモリを持たない
+- EPSGemuEngine `72f70d6` の `src/EPSGemuEngine.cpp`：`kMemoryName` は `"PCM"` で、外部メモリを
+  持つ全チップがこの名前を返す。チップ名の表は `SSGS` / `SSGS2` / `SSGS3` / `AMMS-A` / `PCMD8`
+- FITOM_X `bdea8cf`：カタログのスキーマ、OPL2EX の ADPCM-B の扱い（設計判断 10）
+
+変更：
+
+- `src/FmEmuIfImpl.cpp`：表に OPL2EX（`ADPCM_B` → `ADPCM-B`）と SSGS / SSGS2（`PCM` →
+  `SSGS_ADPCM`）を足した（設計判断 9・10）
+- `test/stub_engine.cpp`：チップ `OPL2EX` / `SSGS2` / `SSGS3` を足した
+- `test/engine_relay_test.cpp`：上の 3 チップをプロファイルに足し、`FmEngine_SetMemory` の
+  判定を 8 件から 11 件にした。SSGS3 には渡らないことも見る
+- README.md の表、`pcm_images.catalog.example.json` の注記
+
+**確認済み**（VS2026、MSVC 19.51、x64、Release。`build-vs2026`）：
+
+- テストだけを直して旧実装のまま走らせると、`relay_current` が新しい 4 判定（SSGS、OPL2EX、
+  SSGS2 への受け渡しと件数）で落ちる。ほかの 4 件は通る
+- 表を直すと `ctest` の 5 件が通る（`relay_current` は 53 判定）
+
+**未検証**：実エンジン（DSAemuEngine / EPSGemuEngine）との組み合わせ。イメージが音に反映
+されることは確かめていない（TODO 4 の「新しい形を実装した実エンジンでは走らせていない」）。
 
 ### 2026年10月4日 FmEngineApi.h の写しを更新（FmEngine_GetNativeRate の廃止）
 

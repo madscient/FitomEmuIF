@@ -608,8 +608,16 @@ private:
         if (ieq("Y8950"))
             return { {"ADPCM_B", "ADPCM-B"} };
 
+        // FITOM_X は OPL2EX の ADPCM-B を Y8950 とメモリ配置まで同一として扱う
+        if (ieq("OPL2EX"))
+            return { {"ADPCM_B", "ADPCM-B"} };
+
         if (ieq("OPL4") || ieq("YMF278"))
             return { {"PCM", "OPL4AWM"} };
+
+        // SSGS3 の PCM は AMM 部のメモリで、対応するカタログキーが無い
+        if (ieq("SSGS") || ieq("SSGS2"))
+            return { {"PCM", "SSGS_ADPCM"} };
 
         return {}; // イメージを渡す外部メモリが無いチップ
     }
