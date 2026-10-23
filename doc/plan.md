@@ -20,7 +20,7 @@ PCM/ADPCM カタログ、ライフサイクル等）は README.md を参照。
 
 - `../FITOM_X` — FITOM_X 本体。`plugin_sdk/include/fitom/IHWPlugin.h` が正本、
   `config_schema/pcm_image_catalog.schema.json` が PCM カタログの正式スキーマ、
-  `docs/plugin-hwif.md` が hwif プラグイン仕様書。
+  `docs/interfaces/plugin-hwif.md` が hwif プラグイン仕様書。
 - `../FMEngineTest` — FmEngineApi の仕様書（`docs/FmEngineApi.md`）と C ヘッダの正本
   （`include/FmEngineApi.h`）。`src/fitom/FmEngineApi.h` はその写しで、直接編集しない。
   仕様の変更の経緯と、各エンジン・アプリケーションに要る対応は `docs/CHANGELOG.md`。
@@ -180,7 +180,7 @@ PCM/ADPCM カタログ、ライフサイクル等）は README.md を参照。
      仕様書にある範囲だけを書いた。
      FITOM_X（`4ab7a56`）は、演奏中の `HWPlugin_SetPartGain` / `GetPartGain` を MIDI 処理・
      タイマーと同じロックで直列化するので、`HWPlugin_Write` とは並行しない（FITOM_X の
-     `docs/plugin-hwif.md` による）。FITOM_X 以外のアプリケーションから呼ぶ場合には、
+     `docs/interfaces/plugin-hwif.md` による）。FITOM_X 以外のアプリケーションから呼ぶ場合には、
      この未確定が残る
    見送った案：
    - FitomEmuIF 固有の拡張にする（`FmEmuIf_*` を別ヘッダに宣言）。理由：利用者が
@@ -188,8 +188,8 @@ PCM/ADPCM カタログ、ライフサイクル等）は README.md を参照。
    - プロファイルのキーで部位ゲインを設定する。理由：依頼はアプリケーション向けの
      インターフェース。キーは外に出る値なので、足すときに決める（足すだけなら互換は
      壊れない）。その後、FITOM_X（`4ab7a56`）が自分のプロファイルの `part_gains` に保存し、
-     デバイスを開いた直後に適用するようになった（書式は FITOM_X の `docs/config-design.md`
-     「部位ごとのゲイン」）。FitomEmuIF 側のキーが要る場面は、今のところ無い
+     デバイスを開いた直後に適用するようになった（書式は FITOM_X の
+     `docs/manuals/profile-reference.md`「チップの出力ごとの音量(`part_gains`)」）。FitomEmuIF 側のキーが要る場面は、今のところ無い
    - 部位の一覧を JSON 文字列で返す（`HWPlugin_Enumerate` と同じ流儀）。理由：FmEngineApi と
      同じ数え上げの形なら、FITOM_X 側に解析が要らない
    やり直しの値段：関数名を変える場合、FitomEmuIF 内は宣言・定義・README・テストの置換で
@@ -230,6 +230,22 @@ PCM/ADPCM カタログ、ライフサイクル等）は README.md を参照。
     （FITOM_staging）にもキーが要る。
 
 ## 作業記録
+
+### 2026年10月23日 FITOM_X の文書再編に合わせて参照を直す
+
+依頼：FITOM_X 側で `docs/` が読者別のディレクトリ（`manuals/`・`design/`・`interfaces/`・
+`proposals/`）に再編されたので、このリポジトリにある FITOM_X の文書への参照を直す。
+作業は FITOM_X 側のセッションが、ユーザーの許可を得て行った。
+
+作業前の状態：FitomEmuIF は origin/main と一致し、作業ツリーはクリーンだった。
+
+- 関連リポジトリの節と設計判断 8 の `docs/plugin-hwif.md` を `docs/interfaces/plugin-hwif.md` に、
+  設計判断 8 の `docs/config-design.md`「部位ごとのゲイン」を
+  `docs/manuals/profile-reference.md`「チップの出力ごとの音量(`part_gains`)」に直した。
+  見出しが FITOM_X 側に実在することは grep で確かめた。
+- 作業記録の節にある参照は記録なので直していない。ファイル名だけで書いた `plugin-hwif.md` は
+  ファイル名が変わっていないのでそのままにした。
+- コードとビルドには触れていない。
 
 ### 2026年10月23日 OPL2EX と SSGS / SSGS2 の外部メモリにイメージを渡す
 
