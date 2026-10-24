@@ -37,7 +37,10 @@ FITOM core
 （`FmEngine_SetMemory` はこれらと異なりスレッドセーフではないため、
 オーディオストリーム開始前の一度きりの呼び出しに限定している。後述）。
 `HWPlugin_SetPartGain` / `HWPlugin_GetPartGain` も排他制御なしで `FmEngine_SetPartGain` /
-`FmEngine_GetPartGain` を呼ぶ（「部位ごとのゲイン」を参照）。
+`FmEngine_GetPartGain` を呼ぶ（「部位ごとのゲイン」を参照）。`HWPlugin_SetMasterVolume` も
+同じく `FmEngine_SetGain` を呼ぶ（「マスターボリューム」を参照）。
+オフライン描画ではオーディオコールバックが無く、`HWPlugin_Render` を呼んだスレッドで
+`FmEngine_Generate` を呼ぶ（「オフライン描画」を参照）。
 
 ## プロファイル JSON
 
@@ -51,8 +54,8 @@ FITOM core
 
 ```jsonc
 {
-  "sample_rate":   44100,      // 全エンジン共通サンプルレート
-  "buffer_frames": 512,        // RtAudio バッファサイズ兼レイテンシ申告値
+  "sample_rate":   44100,      // 全エンジン共通サンプルレート（オフライン描画では使わない）
+  "buffer_frames": 512,        // RtAudio バッファサイズ兼レイテンシ申告値（同上）
   "audio_api":     "auto",     // RtAudio API 名（下表参照）
   "audio_device":  "",         // デバイス名部分一致。空文字でデフォルトデバイス
   "pcm_catalog":   "pcm_images.catalog.json",  // PCM/ADPCM イメージカタログへのパス（省略可、下記参照）
@@ -194,6 +197,10 @@ FITOM が `HWPlugin_Init(profile_path)` を明示的に呼んだ時点で初め�
 `HWPlugin_GetLatencySamples` → `0` 等。`HWPlugin_Shutdown` は複数回呼んでも安全
 （2 回目以降は no-op）。
 
+手順 2 の代わりに `HWPlugin_InitOffline` を呼ぶと、RtAudio ストリームを開かずに初期化する
+（「オフライン描画」を参照）。`HWPlugin_Init` と `HWPlugin_InitOffline` は、どちらか一方を
+一度だけ呼べる。2 回目の呼び出しは `HW_ERR_OPEN_FAILED` を返す。
+
 ## エンジン DLL
 
 `engines[].dll` に書けるのは、FmEngineApi（仕様書と C ヘッダの正本は
@@ -242,9 +249,10 @@ ctest --test-dir build -C Release
 | テスト | 内容 |
 |---|---|
 | `smoke` | 実エンジン DLL なしで動くエラーパスの確認（`test/smoke_test.cpp`） |
-| `relay_*` | 部位ゲインと外部メモリがエンジンへ中継されることの確認（`test/engine_relay_test.cpp`）。エンジンには、呼び出しを記録するだけの検証用エンジン（`test/stub_engine.cpp`）を使う |
+| `relay_*` | 部位ゲイン・マスターボリューム・外部メモリがエンジンへ中継されることと、オフライン描画の確認（`test/engine_relay_test.cpp`）。エンジンには、呼び出しを記録し、書き込まれた値とゲインから決まる直流を出す検証用エンジン（`test/stub_engine.cpp`）を使う |
 
-`relay_*` は `HWPlugin_Init` がオーディオストリームを開くので、出力デバイスのある環境で実行する。
+`relay_offline` 以外の `relay_*` は `HWPlugin_Init` がオーディオストリームを開くので、
+出力デバイスのある環境で実行する。
 
 ### VS2026 (CMake 4.x) 対応について
 
@@ -280,8 +288,8 @@ CMake 4.x（VS2026 同梱版）では `add_subdirectory` 時に configure エラ
 プロファイルに定義されていない `(engine, chip, index)` は `HW_ERR_NOT_FOUND`。
 
 `pan` を指定して Open した場合、`HWPlugin_Close` 時にプロファイル定義の `pan` 値へ
-自動的に戻る（`FmEngine_SetGain` を呼び直す）。`pan` を省略して Open した場合
-（プロファイル値をそのまま使った場合）は Close 時に何もしない。
+自動的に戻る（`FmEngine_SetGain` を呼び直す）。`pan` を省略して Open し、マスターボリュームも
+127 のままの場合は、Close 時に何もしない。
 
 ## 部位ごとのゲイン
 
@@ -336,6 +344,60 @@ HWPlugin_SetPartGain(opna, "SSG", 0.5f, 0.5f);
 | `HW_ERR_INVALID_ARG` | `handle` / `part` / 出力先が `nullptr`、またはデバイスが持たない部位の名前 |
 | `HW_ERR_IO` | エンジンがそれ以外の理由で失敗を返した |
 
+## マスターボリューム
+
+| 関数 | シグネチャ | 説明 |
+|---|---|---|
+| `HWPlugin_SetMasterVolume` | `HWResult (HWHandle, uint8_t volume)` | デバイスの出力にマスターボリュームを掛ける |
+
+`IHWPlugin` の任意関数。
+
+- **値**：0〜127。振幅は `(volume / 127)²` 倍で、GM2 のマスターボリュームと同じカーブ
+  `40·log10(volume / 127)` dB になる。0 は無音、127 は減衰なし。
+- **既定値と寿命**：`HWPlugin_Open` の直後は 127。`HWPlugin_Close` で 127 に戻り、次に Open する
+  側へは持ち越さない。
+- **他のゲインとの関係**：`pan` による L/R の振り分けと掛け合わせて、チップのゲイン
+  （`FmEngine_SetGain`）に渡す。部位ごとのゲインとは別に掛かる（実際に掛かるのはこれらの積）。
+  値はデバイスごとに独立している。
+- **スレッド**：`FmEngine_SetGain` は FmEngineApi の仕様上オーディオコールバックと並行して
+  呼び出せるので、再生中に変えられる。`HWPlugin_Open` / `HWPlugin_Close` と並行しては呼ばないこと。
+
+| 戻り値 | 条件 |
+|---|---|
+| `HW_OK` | 成功 |
+| `HW_ERR_INVALID_ARG` | `handle` が `nullptr`、または `volume` が 128 以上 |
+| `HW_ERR_IO` | エンジンが `FmEngine_SetGain` に失敗を返した |
+
+## オフライン描画
+
+音声デバイスを開かず、アプリケーションが求めた分だけ音を描画して返すモード。
+
+| 関数 | シグネチャ | 説明 |
+|---|---|---|
+| `HWPlugin_InitOffline` | `HWResult (const char* profile_path, uint32_t sample_rate)` | `HWPlugin_Init` の代わりに呼ぶ初期化。RtAudio ストリームを開かない |
+| `HWPlugin_Render` | `HWResult (float* out, uint32_t frames)` | 全エンジンの音を混ぜ、`frames` フレーム分を `out` へ書く |
+
+2 関数は `IHWPlugin` の任意関数で、組でエクスポートしている。
+
+- **初期化**：`profile_path` の扱いは `HWPlugin_Init` と同じ。各エンジンは、プロファイルの
+  `sample_rate` ではなく引数の `sample_rate` で作る。プロファイルの `buffer_frames` /
+  `audio_api` / `audio_device` は使わない。以後は `HWPlugin_Init` の後と同じく、他の全関数が使える。
+- **レイテンシ**：`HWPlugin_GetLatencySamples` は 0 を返す。
+- **出力**：`out` は L/R インターリーブの float（`frames * 2` 要素）で、1.0 がフルスケール。
+  [-1, 1] へのクリップはしない（音声デバイスへ出すときはクリップする）。`pan`・部位ごとのゲイン・
+  マスターボリュームは、音声デバイスへ出すときと同じく掛かる。
+- **長さ**：`frames` に上限は無い。4096 フレームを超える分は分けてエンジンに生成させる。
+- **書き込みの反映**：`HWPlugin_Write` / `HWPlugin_WriteBlock` は溜めずにエンジンへ渡す。
+  呼び出しより前の書き込みが何フレーム目の音から効くかは、エンジンに依る。
+- **終了**：`HWPlugin_Shutdown` は、ストリームを開いていないこのモードでも呼べる。
+
+| 戻り値 | 条件 |
+|---|---|
+| `HW_OK` | 成功 |
+| `HW_ERR_INVALID_ARG` | `HWPlugin_InitOffline`：`sample_rate` が 0、またはプロファイルが見つからない。`HWPlugin_Render`：`out` が `nullptr`、または `HWPlugin_InitOffline` で初期化していない |
+| `HW_ERR_OPEN_FAILED` | `HWPlugin_InitOffline`：初期化済み、またはプロファイルの内容・エンジンの読み込みの誤り（`HWPlugin_Init` と同じ） |
+| `HW_ERR_IO` | `HWPlugin_Render`：エンジンが `FmEngine_Generate` に失敗を返した（他のエンジンの音は書く） |
+
 ## fitom.conf.json 記述例
 
 ```json
@@ -354,6 +416,7 @@ HWPlugin_SetPartGain(opna, "SSG", 0.5f, 0.5f);
 ## レイテンシ同期
 
 `HWPlugin_GetLatencySamples` は、RtAudio の `openStream` 後に確定した
-実際の `buffer_frames` を返す（デバイス制約で変更されることがある）。  
+実際の `buffer_frames` を返す（デバイス制約で変更されることがある）。
+`HWPlugin_InitOffline` で初期化したときは 0 を返す。  
 FITOM コアが全デバイスの最大レイテンシを決定し `HWPlugin_SetDelaySamples` で通知するが、
 FitomEmuIF は `buffer_frames == delay_samples` となるよう設計されているため no-op。

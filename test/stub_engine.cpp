@@ -1,6 +1,9 @@
 // test/stub_engine.cpp
-// FmEngineApi の検証用エンジン。音は出さず、受けた呼び出しを記録する。
+// FmEngineApi の検証用エンジン。受けた呼び出しを記録する。
 // 記録は StubEngine_GetLog() で 1 行 1 呼び出しの文字列として読める。
+// FmEngine_Generate は、チップごとに「port 0 のレジスタ 0x00 に最後に書いた値 / 100」に
+// FmEngine_SetGain のゲインを掛けた直流を、全チップぶん足して出す。音を出すレジスタを
+// 1 つに限るのは、音声デバイスを開くテストが他のレジスタを書いても無音のままにするため。
 //
 // コンパイル時の定義で作り分ける:
 //   (定義なし)                現行の FmEngineApi（部位と外部メモリを名前で指定）
@@ -39,6 +42,7 @@ typedef struct FmEngineOpaque* FmEngineHandle;
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -77,6 +81,7 @@ struct Gain { float l = 1.f; float r = 1.f; };
 struct Chip {
     const ChipDef*    def = nullptr;
     Gain              gain;
+    float             level = 0.f;    // port 0 のレジスタ 0x00 に最後に書いた値 / 100
     std::vector<Gain> part_gains; // def->parts と同じ並び
 };
 
@@ -97,6 +102,9 @@ void log_line(const char* fmt, ...) {
 struct FmEngineOpaque {
     uint32_t          sample_rate = 0;
     std::vector<Chip> chips;
+    // FmEngine_Generate はオーディオコールバックのスレッドから呼ばれ、
+    // Write / SetGain と並行する
+    std::mutex        mutex;
 };
 
 namespace {
@@ -137,6 +145,7 @@ FMENGINE_API const char* FMENGINE_CALL StubEngine_GetLog() {
 FMENGINE_API FmEngineHandle FMENGINE_CALL FmEngine_Create(uint32_t sample_rate) {
     auto* engine = new FmEngineOpaque();
     engine->sample_rate = sample_rate;
+    log_line("Create sample_rate=%u", sample_rate);
     return engine;
 }
 
@@ -184,23 +193,34 @@ FMENGINE_API uint32_t FMENGINE_CALL FmEngine_GetSampleRate(FmEngineHandle engine
 }
 
 FMENGINE_API FmResult FMENGINE_CALL FmEngine_Write(
-    FmEngineHandle engine, uint32_t chip_id, uint8_t, uint8_t, uint32_t)
+    FmEngineHandle engine, uint32_t chip_id, uint8_t reg, uint8_t value, uint32_t port)
 {
-    return find_chip(engine, chip_id) ? FM_OK : FM_ERR_INVALID_ARG;
+    if (!engine) return FM_ERR_INVALID_ARG;
+    std::lock_guard<std::mutex> lock(engine->mutex);
+    Chip* chip = find_chip(engine, chip_id);
+    if (!chip) return FM_ERR_INVALID_ARG;
+    if (reg == 0x00 && port == 0)
+        chip->level = static_cast<float>(value) / 100.f;
+    return FM_OK;
 }
 
 FMENGINE_API FmResult FMENGINE_CALL FmEngine_SetGain(
     FmEngineHandle engine, uint32_t chip_id, float gain_l, float gain_r)
 {
+    if (!engine) return FM_ERR_INVALID_ARG;
+    std::lock_guard<std::mutex> lock(engine->mutex);
     Chip* chip = find_chip(engine, chip_id);
     if (!chip) return FM_ERR_INVALID_ARG;
     chip->gain = Gain{ gain_l, gain_r };
+    log_line("SetGain chip=%u l=%g r=%g", chip_id, gain_l, gain_r);
     return FM_OK;
 }
 
 FMENGINE_API FmResult FMENGINE_CALL FmEngine_GetGain(
     FmEngineHandle engine, uint32_t chip_id, float* out_gain_l, float* out_gain_r)
 {
+    if (!engine) return FM_ERR_INVALID_ARG;
+    std::lock_guard<std::mutex> lock(engine->mutex);
     Chip* chip = find_chip(engine, chip_id);
     if (!chip || !out_gain_l || !out_gain_r) return FM_ERR_INVALID_ARG;
     *out_gain_l = chip->gain.l;
@@ -212,7 +232,15 @@ FMENGINE_API FmResult FMENGINE_CALL FmEngine_Generate(
     FmEngineHandle engine, float* out_l, float* out_r, uint32_t samples)
 {
     if (!engine || !out_l || !out_r) return FM_ERR_INVALID_ARG;
-    for (uint32_t i = 0; i < samples; ++i) { out_l[i] = 0.f; out_r[i] = 0.f; }
+    float l = 0.f, r = 0.f;
+    {
+        std::lock_guard<std::mutex> lock(engine->mutex);
+        for (const auto& chip : engine->chips) {
+            l += chip.level * chip.gain.l;
+            r += chip.level * chip.gain.r;
+        }
+    }
+    for (uint32_t i = 0; i < samples; ++i) { out_l[i] = l; out_r[i] = r; }
     return FM_OK;
 }
 

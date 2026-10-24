@@ -1,5 +1,6 @@
 // test/engine_relay_test.cpp
-// 部位ゲインと外部メモリが FmEngineApi のエンジンへ中継されることを確かめる。
+// 部位ゲイン・マスターボリューム・外部メモリが FmEngineApi のエンジンへ中継されることと、
+// オフライン描画を確かめる。
 //
 //   FitomEmuIF_relay_test <mode> <エンジン DLL のパス>
 //
@@ -9,14 +10,16 @@
 //               検証用エンジンの STUB_LEGACY 版のほか、その版の実エンジンも渡せる
 //               （OPNA / OPL3 / OPM を持つもの）
 //   incomplete  任意の組の一部を欠くエンジン。HWPlugin_Init が失敗すること
+//   offline     HWPlugin_InitOffline と HWPlugin_Render（現行の検証用エンジン）
 //
 // エンジン DLL は FitomEmuIF と同じディレクトリに置く（FitomEmuIF はファイル名で探す）。
-// HWPlugin_Init がオーディオストリームを開くので、出力デバイスが要る。
+// offline 以外は HWPlugin_Init がオーディオストリームを開くので、出力デバイスが要る。
 // PluginRegistry はプロセスに 1 つなので、mode ごとにプロセスを分けて実行する。
 
 #include "fitom/IHWPlugin.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -72,6 +75,27 @@ static int count_prefix(const std::vector<std::string>& lines, const std::string
     for (const auto& l : lines)
         if (l.compare(0, prefix.size(), prefix) == 0) ++n;
     return n;
+}
+
+// 記録のうち、先頭の mark 行より後だけを返す
+static std::vector<std::string> lines_since(const char* text, size_t mark) {
+    auto lines = split_lines(text);
+    if (mark >= lines.size()) return {};
+    return std::vector<std::string>(
+        lines.begin() + static_cast<std::ptrdiff_t>(mark), lines.end());
+}
+
+// 検証用エンジンの FmEngine_SetGain の記録と同じ書式
+static std::string set_gain_line(uint32_t chip, float l, float r) {
+    char buf[96];
+    std::snprintf(buf, sizeof(buf), "SetGain chip=%u l=%g r=%g", chip, l, r);
+    return buf;
+}
+
+// FitomEmuIF の換算と同じ式。演算を揃えて、記録の文字列を一致させる
+static float master_gain(int volume) {
+    const float v = static_cast<float>(volume) / 127.f;
+    return v * v;
 }
 
 // ── テスト用のプロファイルとカタログ ─────────────────────────────────────────
@@ -133,9 +157,12 @@ static void remove_files(const fs::path& dir) {
     fs::remove(dir, ec); // 空のときだけ消える
 }
 
-static HWHandle open_chip(const std::string& engine, const char* chip, int index) {
+static HWHandle open_chip(const std::string& engine, const char* chip, int index,
+                          int pan = -1)
+{
     std::string params = std::string("{\"type\":\"FMHWIF\",\"engine\":\"") + engine
-        + "\",\"chip\":\"" + chip + "\",\"index\":" + std::to_string(index) + "}";
+        + "\",\"chip\":\"" + chip + "\",\"index\":" + std::to_string(index)
+        + (pan >= 0 ? ",\"pan\":" + std::to_string(pan) : std::string()) + "}";
     HWHandle h = nullptr;
     if (HWPlugin_Open(params.c_str(), &h) != HW_OK) return nullptr;
     return h;
@@ -171,7 +198,8 @@ static const char* const kCurrentChips =
     "    { \"chip\": \"OPNA\",  \"clock\": 7987200 },\n"   // 7
     "    { \"chip\": \"OPL2EX\", \"clock\": 3579545 },\n"  // 8
     "    { \"chip\": \"SSGS2\", \"clock\": 6000000 },\n"   // 9
-    "    { \"chip\": \"SSGS3\", \"clock\": 8000000 }\n";   // 10
+    "    { \"chip\": \"SSGS3\", \"clock\": 8000000 },\n"   // 10
+    "    { \"chip\": \"OPM\",   \"clock\": 3579545, \"pan\": 2 }\n"; // 11
 
 static void test_current(const fs::path& profile, const std::string& engine,
                          const char* (*get_log)())
@@ -234,6 +262,64 @@ static void test_current(const fs::path& profile, const std::string& engine,
 
     CHECK(HWPlugin_SetPartGain(opl3, "CD", 1.f, 1.f) == HW_OK);
     CHECK(gain_is(opl3, "CD", 1.f, 1.f));
+
+    // ── マスターボリューム ──
+    HWHandle opm1 = open_chip(engine, "OPM", 1); // プロファイルの pan は 2（R のみ）
+    CHECK(opm1 != nullptr);
+    if (!opm1) return;
+    {
+        const size_t mark = split_lines(get_log()).size();
+        CHECK(HWPlugin_SetMasterVolume(nullptr, 100) == HW_ERR_INVALID_ARG);
+        CHECK(HWPlugin_SetMasterVolume(opm, 128) == HW_ERR_INVALID_ARG);
+        CHECK(HWPlugin_SetMasterVolume(opm, 255) == HW_ERR_INVALID_ARG);
+        CHECK(lines_since(get_log(), mark).empty()); // 失敗した呼び出しはエンジンに書かない
+
+        CHECK(HWPlugin_SetMasterVolume(opm, 64) == HW_OK);
+        CHECK(HWPlugin_SetMasterVolume(opm, 0) == HW_OK);
+        CHECK(HWPlugin_SetMasterVolume(opm, 127) == HW_OK);
+        CHECK(HWPlugin_SetMasterVolume(opm1, 64) == HW_OK);
+        CHECK(HWPlugin_SetMasterVolume(opna1, 10) == HW_OK);
+        CHECK(lines_since(get_log(), mark) == (std::vector<std::string>{
+            set_gain_line(6, master_gain(64), master_gain(64)),
+            "SetGain chip=6 l=0 r=0",                    // 0 は無音
+            "SetGain chip=6 l=1 r=1",
+            set_gain_line(11, 0.f, master_gain(64)),     // プロファイルの pan と掛け合わせる
+            set_gain_line(7, master_gain(10), master_gain(10)),
+        }));
+        CHECK(gain_is(opna1, "SSG", 1.f, 1.f)); // 部位ゲインは変わらない
+    }
+    {
+        // Open の pan の上書きと掛け合わせる。Close でプロファイルの pan と 127 に戻る
+        const size_t mark = split_lines(get_log()).size();
+        HWPlugin_Close(opm1);
+        opm1 = open_chip(engine, "OPM", 1, 1);
+        CHECK(opm1 != nullptr);
+        if (!opm1) return;
+        CHECK(HWPlugin_SetMasterVolume(opm1, 32) == HW_OK);
+        HWPlugin_Close(opm1);
+        CHECK(lines_since(get_log(), mark) == (std::vector<std::string>{
+            "SetGain chip=11 l=0 r=1",                // 前のハンドルの Close
+            "SetGain chip=11 l=1 r=0",                // pan の上書き
+            set_gain_line(11, master_gain(32), 0.f),
+            "SetGain chip=11 l=0 r=1",                // Close
+        }));
+    }
+    {
+        // 127 に戻してから閉じたハンドルと、触れていないハンドルの Close は書かない
+        const size_t mark = split_lines(get_log()).size();
+        HWPlugin_Close(opm);
+        opm = open_chip(engine, "OPM", 0);
+        CHECK(opm != nullptr);
+        if (!opm) return;
+        CHECK(lines_since(get_log(), mark).empty());
+    }
+
+    // ── 通常の初期化ではオフライン描画を受け付けない ──
+    {
+        float buf[4] = {};
+        CHECK(HWPlugin_Render(buf, 2) == HW_ERR_INVALID_ARG);
+        CHECK(HWPlugin_GetLatencySamples(opm) > 0);
+    }
 
     // ── 引数の誤り ──
     float l = 0.f, r = 0.f;
@@ -330,11 +416,102 @@ static void test_incomplete(const fs::path& profile) {
     CHECK(HWPlugin_Enumerate() == nullptr);
 }
 
+// ── mode: offline ────────────────────────────────────────────────────────────
+// 検証用エンジンの Generate は、チップごとの「port 0 のレジスタ 0x00 に最後に書いた値 / 100
+// × チップのゲイン」の和を直流で出す。
+
+static const char* const kOfflineChips =
+    "    { \"chip\": \"OPM\", \"clock\": 3579545 },\n"              // chip_id 0
+    "    { \"chip\": \"OPM\", \"clock\": 3579545, \"pan\": 1 }\n";  // 1（L のみ）
+
+// 全フレームが (l, r) であること。書かれなかったフレームを見分けるため、
+// 呼び出し側は描画の前に out を番兵で埋めておく
+static bool all_frames_are(const std::vector<float>& out, uint32_t frames, float l, float r) {
+    if (out.size() < static_cast<size_t>(frames) * 2u) return false;
+    for (uint32_t i = 0; i < frames; ++i) {
+        if (std::fabs(out[i * 2 + 0] - l) > 1e-5f) return false;
+        if (std::fabs(out[i * 2 + 1] - r) > 1e-5f) return false;
+    }
+    return true;
+}
+
+static HWResult render(std::vector<float>& out, uint32_t frames) {
+    out.assign(static_cast<size_t>(frames) * 2u, -100.f);
+    return HWPlugin_Render(out.data(), frames);
+}
+
+static void test_offline(const fs::path& profile, const std::string& engine,
+                         const char* (*get_log)())
+{
+    const std::string path = profile.string();
+    std::vector<float> out;
+
+    // ── 初期化 ──
+    CHECK(render(out, 8) == HW_ERR_INVALID_ARG);                     // 初期化の前
+    CHECK(HWPlugin_InitOffline(path.c_str(), 0) == HW_ERR_INVALID_ARG);
+    CHECK(HWPlugin_Enumerate() == nullptr);                          // 上の失敗で初期化されていない
+    CHECK(HWPlugin_InitOffline(path.c_str(), 48000) == HW_OK);
+    CHECK(HWPlugin_Init(path.c_str()) == HW_ERR_OPEN_FAILED);        // 二重の初期化
+    CHECK(get_log != nullptr);
+    if (g_fail || !get_log) return;
+    {
+        // プロファイルの 44100 ではなく引数のレートでエンジンを作る
+        auto log = split_lines(get_log());
+        CHECK(has_line(log, "Create sample_rate=48000"));
+        CHECK(count_prefix(log, "Create ") == 1);
+    }
+
+    HWHandle a = open_chip(engine, "OPM", 0);
+    HWHandle b = open_chip(engine, "OPM", 1);
+    CHECK(a && b);
+    if (!a || !b) return;
+    CHECK(HWPlugin_GetLatencySamples(a) == 0);
+    CHECK(HWPlugin_Render(nullptr, 8) == HW_ERR_INVALID_ARG);
+    CHECK(HWPlugin_Render(nullptr, 0) == HW_ERR_INVALID_ARG);
+    CHECK(render(out, 0) == HW_OK);
+
+    // ── 書き込みは最初のフレームから効き、全チップを足し、pan を掛ける ──
+    CHECK(HWPlugin_Write(a, 0x0000, 50) == HW_OK);
+    CHECK(HWPlugin_Write(b, 0x0000, 30) == HW_OK);
+    CHECK(render(out, 44) == HW_OK);
+    CHECK(all_frames_are(out, 44, 0.8f, 0.5f));
+    // 検証用エンジンの約束の確認: 0x00 以外のレジスタは音を変えない
+    CHECK(HWPlugin_Write(a, 0x0007, 0x38) == HW_OK);
+    CHECK(render(out, 44) == HW_OK);
+    CHECK(all_frames_are(out, 44, 0.8f, 0.5f));
+
+    // ── クリップしない ──
+    CHECK(HWPlugin_Write(a, 0x0000, 200) == HW_OK);
+    CHECK(render(out, 44) == HW_OK);
+    CHECK(all_frames_are(out, 44, 2.3f, 2.0f));
+
+    // ── 一時バッファ（4096 フレーム）より長い要求は分割して全フレームを書く ──
+    CHECK(render(out, 4096 * 2 + 7) == HW_OK);
+    CHECK(all_frames_are(out, 4096 * 2 + 7, 2.3f, 2.0f));
+
+    // ── マスターボリュームも掛かる ──
+    CHECK(HWPlugin_SetMasterVolume(a, 64) == HW_OK);
+    CHECK(HWPlugin_SetMasterVolume(b, 0) == HW_OK);
+    CHECK(render(out, 44) == HW_OK);
+    CHECK(all_frames_are(out, 44, 2.f * master_gain(64), 2.f * master_gain(64)));
+
+    // ── Close でマスターボリュームが 127 に戻る（チップの状態はエンジンに残る）──
+    HWPlugin_Close(a);
+    a = open_chip(engine, "OPM", 0);
+    CHECK(a != nullptr);
+    CHECK(render(out, 44) == HW_OK);
+    CHECK(all_frames_are(out, 44, 2.f, 2.f));
+
+    if (a) HWPlugin_Close(a);
+    HWPlugin_Close(b);
+    HWPlugin_Shutdown(); // ストリームを開いていなくても戻ること
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 int main(int argc, char** argv) {
     if (argc != 3) {
-        std::printf("usage: %s <current|legacy|incomplete> <engine dll path>\n", argv[0]);
+        std::printf("usage: %s <current|legacy|incomplete|offline> <engine dll path>\n", argv[0]);
         return 2;
     }
     const std::string mode        = argv[1];
@@ -345,14 +522,16 @@ int main(int argc, char** argv) {
     const bool is_current    = (mode == "current");
     const bool is_legacy     = (mode == "legacy");
     const bool is_incomplete = (mode == "incomplete");
-    if (!is_current && !is_legacy && !is_incomplete) {
+    const bool is_offline    = (mode == "offline");
+    if (!is_current && !is_legacy && !is_incomplete && !is_offline) {
         std::printf("unknown mode: %s\n", mode.c_str());
         return 2;
     }
 
     const fs::path dir = fs::temp_directory_path()
         / ("fitomemuif_relay_test_" + mode + "_" + engine_path.stem().string());
-    write_files(dir, engine, is_legacy ? kLegacyChips : kCurrentChips);
+    write_files(dir, engine,
+                is_legacy ? kLegacyChips : is_offline ? kOfflineChips : kCurrentChips);
     const fs::path profile = dir / kProfileFile;
 
     using GetLogFn = const char* (*)();
@@ -361,6 +540,7 @@ int main(int argc, char** argv) {
 
     if (is_current)         test_current(profile, engine, get_log);
     else if (is_legacy)     test_legacy(profile, engine, engine_path, get_log);
+    else if (is_offline)    test_offline(profile, engine, get_log);
     else                    test_incomplete(profile);
 
     remove_files(dir);

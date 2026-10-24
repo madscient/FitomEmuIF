@@ -203,4 +203,6 @@ if(BUILD_FITOMEMUIF_TEST)
         COMMAND FitomEmuIF_relay_test incomplete $<TARGET_FILE:StubEngineNoPartName>)
     add_test(NAME relay_no_memory_name
         COMMAND FitomEmuIF_relay_test incomplete $<TARGET_FILE:StubEngineNoMemoryName>)
+    add_test(NAME relay_offline
+        COMMAND FitomEmuIF_relay_test offline $<TARGET_FILE:StubEngine>)
 endif()

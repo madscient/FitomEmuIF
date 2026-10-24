@@ -24,6 +24,13 @@
 //    チップの部位（FM と SSG など、別々の端子から出る出力）ごとのゲインを
 //    FmEngine へ中継する。設定したゲインは Close で既定値に戻す。
 //
+//  [HWPlugin_SetMasterVolume]
+//    pan と掛け合わせて FmEngine_SetGain に渡す。Close で既定値（127）に戻す。
+//
+//  [HWPlugin_InitOffline / HWPlugin_Render]
+//    HWPlugin_Init の代わりに初期化し、RtAudio ストリームを開かない。
+//    HWPlugin_Render がオーディオコールバックと同じミックスをクリップせずに返す。
+//
 // ─── プロファイル JSON (fmemuif_profile.json) ─────────────────────────────────
 //
 //  {
@@ -287,6 +294,31 @@ struct EngineInstance {
 };
 
 // ════════════════════════════════════════════════════════════════════════════
+//  チップのゲイン（pan × マスターボリューム）
+// ════════════════════════════════════════════════════════════════════════════
+
+static constexpr uint8_t kDefaultMasterVolume = 127;
+
+// GM2 のカーブ 40·log10(v/127) dB を振幅にしたもの。0 は無音。
+static float master_volume_gain(uint8_t volume) {
+    const float v = static_cast<float>(volume) / 127.f;
+    return v * v;
+}
+
+// FmEngine のチップのゲインは 1 組しか無く、pan とマスターボリュームはどちらも
+// そこへ畳み込む。片方だけを書くともう片方が消えるので、どちらを変えるときも
+// ここで両方から計算し直す。
+static FmResult apply_chip_gain(EngineInstance& inst, const ChipSlot& slot,
+                                int panpot, uint8_t master_volume)
+{
+    const float g = master_volume_gain(master_volume);
+    float l = g, r = g;
+    if (panpot == 1) r = 0.f;
+    else if (panpot == 2) l = 0.f;
+    return inst.vtbl.SetGain(inst.engine, slot.chip_id, l, r);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 //  RtAudio API 名 → RtAudio::Api 変換
 // ════════════════════════════════════════════════════════════════════════════
 
@@ -333,9 +365,14 @@ struct PluginRegistry {
     std::unique_ptr<RtAudio> rtaudio;
 
     // ── 状態 ──────────────────────────────────────────────────────────────
-    bool        initialized   = false; // HWPlugin_Init 成功後に true
+    bool        initialized   = false; // HWPlugin_Init / InitOffline 成功後に true
+    bool        offline       = false; // HWPlugin_InitOffline で初期化した
     bool        shutdown_done = false; // HWPlugin_Shutdown 実行済みか
     std::string init_error;
+
+    // オフライン描画で 1 回の FmEngine_Generate に渡す最大フレーム数。
+    // HWPlugin_Render はこれより長い要求を分割する。
+    static constexpr uint32_t kOfflineChunkFrames = 4096;
 
     // ─────────────────────────────────────────────────────────────────────
     static PluginRegistry& instance() {
@@ -344,9 +381,13 @@ struct PluginRegistry {
     }
 
     // ── 明示的初期化 ─────────────────────────────────────────────────────
-    // HWPlugin_Init から呼ぶ。二重呼び出し時は HW_ERR_OPEN_FAILED を返す。
-    HWResult init(const char* profile_path) {
+    // HWPlugin_Init（offline_sample_rate なし）と HWPlugin_InitOffline から呼ぶ。
+    // 二重呼び出し時は HW_ERR_OPEN_FAILED を返す。
+    HWResult init(const char* profile_path,
+                  std::optional<uint32_t> offline_sample_rate = std::nullopt)
+    {
         if (initialized) return HW_ERR_OPEN_FAILED; // 二重初期化禁止
+        if (offline_sample_rate && *offline_sample_rate == 0) return HW_ERR_INVALID_ARG;
 
         // パス解決: 引数 → 環境変数 → DLL 隣 → カレントディレクトリ
         std::optional<fs::path> resolved;
@@ -373,7 +414,9 @@ struct PluginRegistry {
 
             json root = json::parse(ifs, nullptr, true, true); // コメント許可
 
-            sample_rate       = root.value("sample_rate",   44100u);
+            sample_rate       = offline_sample_rate
+                                    ? *offline_sample_rate
+                                    : root.value("sample_rate", 44100u);
             buffer_frames     = root.value("buffer_frames", 512u);
             audio_api_name    = root.value("audio_api",     std::string("auto"));
             audio_device_name = root.value("audio_device",  std::string(""));
@@ -402,8 +445,14 @@ struct PluginRegistry {
             for (auto& eng_json : root.at("engines"))
                 load_engine(eng_json, pcm_catalog, pcm_catalog_dir);
 
-            start_audio();
+            if (offline_sample_rate) {
+                for (auto& inst : engines)
+                    inst->resize_tmp(kOfflineChunkFrames);
+            } else {
+                start_audio();
+            }
 
+            offline     = offline_sample_rate.has_value();
             initialized = true;
             return HW_OK;
         } catch (const std::exception& e) {
@@ -438,6 +487,37 @@ struct PluginRegistry {
         // デストラクタで解放されるため、ここでは engines.clear() を呼ばない。
         // HWPlugin_Shutdown 後に HWPlugin_Write 等が呼ばれた場合は
         // rtaudio 停止済みでもエンジン自体は生きているため安全に失敗を返せる。
+    }
+
+    // ── ミックス ─────────────────────────────────────────────────────────
+    // 全エンジンの出力を out（L/R インターリーブ、frames フレーム）に加算する。
+    // クリップはしない。一時バッファより長い frames は分割して Generate する。
+    // Generate が失敗したエンジンは残りのフレームを足さずに次のエンジンへ進み、
+    // 最後に false を返す。
+    bool mix(float* out, uint32_t frames) {
+        std::fill(out, out + static_cast<size_t>(frames) * 2u, 0.f);
+
+        bool ok = true;
+        for (auto& inst : engines) {
+            const uint32_t chunk = static_cast<uint32_t>(
+                std::min(inst->tmp_l.size(), inst->tmp_r.size()));
+            if (chunk == 0) { ok = false; continue; }
+
+            for (uint32_t done = 0; done < frames; ) {
+                const uint32_t n = std::min(chunk, frames - done);
+                FmResult fr = inst->vtbl.Generate(
+                    inst->engine, inst->tmp_l.data(), inst->tmp_r.data(), n);
+                if (fr != FM_OK) { ok = false; break; }
+
+                float* dst = out + static_cast<size_t>(done) * 2u;
+                for (uint32_t i = 0; i < n; ++i) {
+                    dst[i * 2 + 0] += inst->tmp_l[i];
+                    dst[i * 2 + 1] += inst->tmp_r[i];
+                }
+                done += n;
+            }
+        }
+        return ok;
     }
 
 private:
@@ -516,7 +596,7 @@ private:
             slot.panpot          = panpot;
             slot.parts           = query_parts(*inst, chip_id);
 
-            apply_panpot(*inst, slot);
+            apply_chip_gain(*inst, slot, slot.panpot, kDefaultMasterVolume);
 
             // PCM/ADPCM メモリイメージをこのチップに設定する
             // FmEngine_SetMemory はオーディオストリーム開始前に呼ぶ必要がある
@@ -527,14 +607,6 @@ private:
         }
 
         engines.push_back(std::move(inst));
-    }
-
-    // ── パノラマをエンジンに反映 ───────────────────────────────────────────
-    static void apply_panpot(EngineInstance& inst, const ChipSlot& slot) {
-        float l = 1.f, r = 1.f;
-        if (slot.panpot == 1) r = 0.f;
-        else if (slot.panpot == 2) l = 0.f;
-        inst.vtbl.SetGain(inst.engine, slot.chip_id, l, r);
     }
 
     // ── チップの部位をエンジンに問い合わせる ─────────────────────────────
@@ -767,27 +839,7 @@ private:
         auto* self = static_cast<PluginRegistry*>(user_data);
         float* out = static_cast<float*>(output);
 
-        // 出力バッファをゼロクリア
-        std::fill(out, out + n_frames * 2u, 0.f);
-
-        for (auto& inst : self->engines) {
-            // tmp バッファが n_frames に足りない場合は安全にスキップ
-            if (inst->tmp_l.size() < n_frames || inst->tmp_r.size() < n_frames)
-                continue;
-
-            FmResult fr = inst->vtbl.Generate(
-                inst->engine,
-                inst->tmp_l.data(),
-                inst->tmp_r.data(),
-                n_frames);
-            if (fr != FM_OK) continue;
-
-            // 加算ミックス（インターリーブ L/R）
-            for (uint32_t i = 0; i < n_frames; ++i) {
-                out[i * 2 + 0] += inst->tmp_l[i];
-                out[i * 2 + 1] += inst->tmp_r[i];
-            }
-        }
+        self->mix(out, n_frames);
 
         // クリッピング：[-1, 1] にクランプ
         for (uint32_t i = 0; i < n_frames * 2u; ++i)
@@ -805,6 +857,7 @@ struct HWDeviceOpaque {
     EngineInstance* engine_inst    = nullptr;
     ChipSlot*       slot           = nullptr;
     int             panpot_override = -1; // -1 = プロファイル値を使う
+    uint8_t         master_volume  = kDefaultMasterVolume;
     bool            is_open        = false;
     bool            part_gain_set  = false; // HWPlugin_SetPartGain が成功したか
 };
@@ -830,6 +883,15 @@ FITOM_HWP_API const char* FITOM_HWP_CALL HWPlugin_GetName() {
 
 FITOM_HWP_API HWResult FITOM_HWP_CALL HWPlugin_Init(const char* profile_path) {
     return PluginRegistry::instance().init(profile_path);
+}
+
+// profile_path の扱いは HWPlugin_Init と同じ。プロファイルの sample_rate の代わりに
+// 引数の sample_rate でエンジンを作り、RtAudio ストリームは開かない。
+
+FITOM_HWP_API HWResult FITOM_HWP_CALL HWPlugin_InitOffline(
+    const char* profile_path, uint32_t sample_rate)
+{
+    return PluginRegistry::instance().init(profile_path, sample_rate);
 }
 
 // ── デバイス列挙 ──────────────────────────────────────────────────────────────
@@ -907,12 +969,8 @@ FITOM_HWP_API HWResult FITOM_HWP_CALL HWPlugin_Open(
             dev->panpot_override = pan_override;
             dev->is_open        = true;
 
-            if (pan_override >= 0) {
-                float l = 1.f, r = 1.f;
-                if (pan_override == 1) r = 0.f;
-                else if (pan_override == 2) l = 0.f;
-                inst->vtbl.SetGain(inst->engine, slot.chip_id, l, r);
-            }
+            if (pan_override >= 0)
+                apply_chip_gain(*inst, slot, pan_override, kDefaultMasterVolume);
 
             *out_handle = dev;
             return HW_OK;
@@ -923,15 +981,11 @@ FITOM_HWP_API HWResult FITOM_HWP_CALL HWPlugin_Open(
 
 FITOM_HWP_API void FITOM_HWP_CALL HWPlugin_Close(HWHandle handle) {
     if (!handle) return;
-    // pan オーバーライドが設定されていた場合、プロファイルの panpot 値に戻す
+    // pan の上書きとマスターボリュームは、プロファイルの panpot 値と 127 に戻す
     auto& inst = *handle->engine_inst;
     auto& slot = *handle->slot;
-    if (handle->panpot_override >= 0) {
-        float l = 1.f, r = 1.f;
-        if (slot.panpot == 1) r = 0.f;
-        else if (slot.panpot == 2) l = 0.f;
-        inst.vtbl.SetGain(inst.engine, slot.chip_id, l, r);
-    }
+    if (handle->panpot_override >= 0 || handle->master_volume != kDefaultMasterVolume)
+        apply_chip_gain(inst, slot, slot.panpot, kDefaultMasterVolume);
     // 部位ゲインも同じく、次に Open する側へ持ち越さない
     if (handle->part_gain_set) {
         for (const auto& part : slot.parts)
@@ -1057,13 +1111,40 @@ FITOM_HWP_API HWResult FITOM_HWP_CALL HWPlugin_GetPartGain(
     return HW_OK;
 }
 
+// ── マスターボリューム ───────────────────────────────────────────────────────
+
+FITOM_HWP_API HWResult FITOM_HWP_CALL HWPlugin_SetMasterVolume(
+    HWHandle handle, uint8_t volume)
+{
+    if (!handle || volume > 127) return HW_ERR_INVALID_ARG;
+    if (!handle->is_open) return HW_ERR_IO;
+
+    FmResult fr = apply_chip_gain(*handle->engine_inst, *handle->slot,
+                                  effective_panpot(handle), volume);
+    if (fr != FM_OK) return HW_ERR_IO;
+
+    handle->master_volume = volume;
+    return HW_OK;
+}
+
+// ── オフライン描画 ───────────────────────────────────────────────────────────
+// HWPlugin_Write は溜めずに FmEngine_Write へ渡すので、FitomEmuIF の側では
+// 書き込みを遅らせない。書き込みが何フレーム目の音から効くかはエンジンに依る。
+
+FITOM_HWP_API HWResult FITOM_HWP_CALL HWPlugin_Render(float* out, uint32_t frames) {
+    auto& reg = PluginRegistry::instance();
+    if (!out || !reg.initialized || !reg.offline) return HW_ERR_INVALID_ARG;
+    return reg.mix(out, frames) ? HW_OK : HW_ERR_IO;
+}
+
 // ── レイテンシ同期 ────────────────────────────────────────────────────────────
 
 FITOM_HWP_API uint32_t FITOM_HWP_CALL HWPlugin_GetLatencySamples(HWHandle handle) {
-    // レイテンシ = RtAudio が使う実際の buffer_frames（openStream 後に確定）
+    // レイテンシ = RtAudio が使う実際の buffer_frames（openStream 後に確定）。
+    // オフラインでは書き込みが次の HWPlugin_Render の先頭から反映されるので 0
     if (!handle) return 0;
     auto& reg = PluginRegistry::instance();
-    if (!reg.initialized) return 0;
+    if (!reg.initialized || reg.offline) return 0;
     return reg.buffer_frames;
 }
 

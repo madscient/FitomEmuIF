@@ -41,8 +41,8 @@ PCM/ADPCM カタログ、ライフサイクル等）は README.md を参照。
 1. **`src/fitom/IHWPlugin.h` を正本と同一に保つ仕組みが無い**
    FITOM_X の `plugin_sdk/include/fitom/IHWPlugin.h`（正本）の写しを、手動で管理している
    （`FmEmuIfImpl.cpp` の `#include` 直後に TODO コメントあり）。
-   2026年10月4日に、写しを FITOM_X `4ab7a56` の正本と同一にした（改行の違いを除いて
-   diff で一致。確認済み）。正本が変わったら、写しをまるごと差し替える。
+   2026年10月25日に、写しを FITOM_X `faaf183` の正本と同一にした（diff で一致。確認済み）。
+   正本が変わったら、写しをまるごと差し替える。
    対処案: FITOM_X の `plugin_sdk` を submodule 化する、または CI で diff チェックする。
    `src/fitom/FmEngineApi.h`（正本は FMEngineTest）にも同じ課題がある。
 2. **FitomIFTest (`fitom_hw.dll`) 側の `HWPlugin_Init`/`HWPlugin_Shutdown` 対応状況が未確認**
@@ -51,6 +51,9 @@ PCM/ADPCM カタログ、ライフサイクル等）は README.md を参照。
    （c0a533d、WASAPI のみ有効）で Release ビルドが通った。実エンジン DLL（YMEngine の `YMFMEngine.dll`）を使って、
    `HWPlugin_Init`（オーディオストリームの起動を含む）→ `Open` → `GetClock` が動くことも
    確認した。音が出るか、正しく鳴るかは聴いていない。Linux/macOS の実機ビルドもしていない。
+   2026年10月25日に、オフライン描画（音声デバイスを通らない）で実エンジンの出力に音が
+   あることは数値で確かめた（作業記録「マスターボリュームとオフライン描画を実装」）。
+   音声デバイスへ出す経路は、引き続き聴いていない。
 4. **FmEngineApi の改訂（部位と外部メモリの名前指定）への追従の残り**。FitomEmuIF 側の
    実装は済んだ（設計判断 8・9、作業記録「FmEngineApi の改訂に追従し、部位ゲインの
    インターフェースを追加」）。残っているのは次のとおり。
@@ -91,6 +94,9 @@ PCM/ADPCM カタログ、ライフサイクル等）は README.md を参照。
 7. **`HWPlugin_Init` のエラー戻り値が `IHWPlugin.h` の定めと食い違う**。プロファイル内容の
    エラーも `HW_ERR_OPEN_FAILED` を返すが、`IHWPlugin.h` はプロファイル解析失敗を
    `HW_ERR_INVALID_ARG` と定めている（設計判断 7）。
+   `HWPlugin_InitOffline` も同じ。加えて、`IHWPlugin.h` は扱えない `sample_rate` を
+   `HW_ERR_INVALID_ARG` と定めているが、FitomEmuIF が見分けられるのは 0 だけで、エンジンが
+   `FmEngine_Create` に失敗するレートは `HW_ERR_OPEN_FAILED` になる（設計判断 12）。
 8. **`audio_api` の `asio` / `ds` が既定のビルドでは使えない**。README.md と
    `fmemuif_profile.example.json` は指定できる値として載せているが、RtAudio の
    `RTAUDIO_API_ASIO` / `RTAUDIO_API_DS` は既定で OFF で、FitomEmuIF の CMakeLists.txt も
@@ -228,8 +234,101 @@ PCM/ADPCM カタログ、ライフサイクル等）は README.md を参照。
     やり直しの値段：専用キーに変えるなら、`pcm_mappings_for_chip()` の文字列 1 か所、README の
     表 1 行、`test/engine_relay_test.cpp` のイメージと判定。FITOM_X のスキーマと運用カタログ
     （FITOM_staging）にもキーが要る。
+11. **マスターボリュームは振幅 `(v/127)²` で、pan と掛け合わせて `FmEngine_SetGain` に渡す**
+    （2026年10月25日）。
+    利用者と決めたこと：換算は GM2 のカーブ `40·log10(v/127)` dB を振幅にした `(v/127)²`。
+    0 は振幅 0（無音）。FITOM が CC#7 に使う表（FITOM_X の `core/src/VolumeUtils.cpp` の
+    `kGM2dB`）とは v=1〜127 で同じカーブになる（表の値と式を突き合わせた。表の v=0 は -96 dB）。
+    見送った案：
+    - `kGM2dB` と v=0 まで一致させる（-96 dB、振幅 約1.6e-5）。理由：0 で音がわずかに残る
+    - 線形 `v/127`。理由：FITOM のチャンネルボリュームと効き方が揃わない
+    こちらで決めたこと：
+    - 掛ける場所は `FmEngine_SetGain`（チップごとのゲイン）。`FmEngine_Generate` はエンジン内の
+      全チップを混ぜて返すので、FitomEmuIF のミキサーではデバイス（チップ）ごとに掛けられない。
+      pan もこのゲインで実現しているので、`apply_chip_gain()` が pan とマスターボリュームの両方から
+      L/R を計算し、Init・Open（pan の上書き）・Close・SetMasterVolume のすべてがここを通る
+    - 値はハンドル（`HWDeviceOpaque::master_volume`）に持つ。Close で 127 に戻す。pan の上書きか
+      127 以外の値を持つハンドルの Close だけが `FmEngine_SetGain` を書き直す
+    - `FmEngine_SetGain` が失敗したら `HW_ERR_IO` を返し、値を控えない
+    前提：FitomEmuIF の中で `FmEngine_SetGain` を書くのが pan とマスターボリュームだけであること。
+    やり直しの値段：換算を変えるなら `master_volume_gain()` 1 か所、README の 1 行、テストの
+    `master_gain()`（期待値はそこから計算している）。
+12. **オフライン描画は、初期化を `HWPlugin_Init` と共通にし、オーディオコールバックと同じ
+    ミックスを使う**（2026年10月25日）。
+    こちらで決めたこと（利用者と明示的には決めていない）：
+    - `PluginRegistry::init()` に任意の `offline_sample_rate` を足し、あるときは
+      `start_audio()` を呼ばない。プロファイルの `sample_rate` は引数で置き換え、エンジンの
+      `FmEngine_Create` に渡す
+    - ミックスは `PluginRegistry::mix()` にまとめ、`audio_callback` はその後でクリップする。
+      `HWPlugin_Render` はクリップしない
+    - 一時バッファより長い要求は分割して `FmEngine_Generate` を呼ぶ。オフラインの一時バッファは
+      4096 フレーム固定（`kOfflineChunkFrames`）で、プロファイルの `buffer_frames` は使わない。
+      `audio_callback` も同じ分割を通るようになった。以前は一時バッファより長い要求の
+      エンジンを飛ばしていた。RtAudio が `openStream` で確定したフレーム数より長い要求で
+      コールバックを呼ぶことがあるかは確かめていない。あるなら、以前はその回だけ無音に
+      なっていたエンジンが鳴るようになる
+    - `sample_rate` の検査は 0 だけ（TODO 7）。エンジンが扱えるレートを問い合わせる API が無い
+    - `FmEngine_Generate` が失敗したエンジンは足さずに他のエンジンを足し、`HW_ERR_IO` を返す
+    - `HWPlugin_Init` で初期化した後の `HWPlugin_Render` は `HW_ERR_INVALID_ARG`。
+      `HWPlugin_Init` と `HWPlugin_InitOffline` は、どちらか一方を一度だけ受け付ける
+    - 書き込みは溜めずに `FmEngine_Write` へ渡すので、FitomEmuIF の側では遅らせない。何フレーム目
+      から音に効くかはエンジン次第（YMEngine はキー衝突時に書き込みを遅らせる。作業記録
+      「YMEngine 更新（b575a78〜26baa63）の影響確認」）
+    前提：FmEngineApi の `FmEngine_Generate` が、呼び出しのフレーム数を問わず続きを生成すること。
 
 ## 作業記録
+
+### 2026年10月25日 マスターボリュームとオフライン描画を実装
+
+依頼：FITOM_X のセッションからの依頼文（FITOM_X の `docs/plans/` に置かれ、終われば FITOM_X 側で
+消す）。FITOM_X が HW プラグインの契約に任意の `HWPlugin_SetMasterVolume`（`d214ff9`）と、
+組の `HWPlugin_InitOffline` / `HWPlugin_Render`（`faaf183`。SMF を WAV へ変換する `fitom_render`
+が使う）を足したので、FitomEmuIF に実装し、`IHWPlugin.h` の写しを同期する。要件は FITOM_X
+`faaf183` の `docs/interfaces/plugin-hwif.md`「マスターボリューム」「オフライン描画」節。
+
+作業前の状態：FitomEmuIF は origin/main と一致し、作業ツリーには git 管理外の `buildvc2026/` が
+あった（触れていない）。FITOM_X は読んだだけで編集していない。
+
+変更：
+
+- `src/fitom/IHWPlugin.h`：FITOM_X `faaf183` の正本に差し替えた（TODO 1）
+- `src/FmEmuIfImpl.cpp`：`HWPlugin_SetMasterVolume`（設計判断 11）、`HWPlugin_InitOffline` /
+  `HWPlugin_Render`、オフラインでの `HWPlugin_GetLatencySamples` = 0（設計判断 12）
+- `test/stub_engine.cpp`：`FmEngine_Generate` が、port 0 のレジスタ 0x00 に書いた値とチップの
+  ゲインから決まる直流を出すようにした。音声デバイスを開くテストが音を出さないよう、
+  音を出すレジスタは 1 つに限った。`FmEngine_Create` / `FmEngine_SetGain` を記録し、
+  オーディオスレッドとの並行のために mutex を入れた
+- `test/engine_relay_test.cpp`：`current` にマスターボリュームの判定と、通常の初期化での
+  `HWPlugin_Render` の失敗を足した（チップに pan=2 の OPM を 1 つ足した）。`offline` モードを足した
+- `test/smoke_test.cpp`：初期化前の `Render`、`InitOffline` の引数誤り、`SetMasterVolume(nullptr)`
+- `CMakeLists.txt`：ctest に `relay_offline` を足した（6 件）
+- README.md：「マスターボリューム」「オフライン描画」の節、ライフサイクル、レイテンシ、テスト
+
+**確認済み**（VS2026、MSVC 19.51、x64、Release。`build-vs2026`）：
+
+- `ctest` の 6 件が通る。判定数は `relay_current` 72、`relay_legacy` 11、`relay_offline` 32、
+  `smoke` 14
+- 実装を 1 か所ずつ壊して再ビルドすると、それぞれ `relay_current` か `relay_offline` が落ちる：
+  Render でクリップする、Close でマスターボリュームを戻さない、マスターボリュームで pan を
+  無視する、オフラインでプロファイルのレートを使う、分割せず長い要求のエンジンを飛ばす、
+  オフラインでもレイテンシに `buffer_frames` を返す、128 以上を受け付ける、換算を線形にする
+  （8 通り）。戻した後は通る
+- 実エンジン：`../YMEngine/build/bin/Release/YMFMEngine.dll`（2026年10月23日のビルド。
+  `FmEngine_GetPartCount` / `GetMemoryCount` を持つ。どのコミットからビルドされたかは
+  確かめていない）を Python の ctypes から使い、`HWPlugin_InitOffline`（48000 Hz）→ OPM を開く →
+  1 音鳴らす → `HWPlugin_Render`。描画の最初の 1ms（48 フレーム）から RMS 0.186 の音が出る。
+  レイテンシは 0。マスターボリューム 127→64 で RMS の比は 0.2552（`(64/127)²` は 0.2540）、
+  0 でピーク 0、Close の後は元の RMS に戻る。ストリームを開いていない状態でも
+  `HWPlugin_Shutdown` は戻る。音は聴いていない（数値だけ）
+
+**未検証**：
+
+- FITOM_X（`fitom_render` と、演奏中の `HWPlugin_SetMasterVolume`）と組み合わせた動作
+- 再生中のマスターボリュームの変更を聴いて確かめること。`relay_current` はストリームを開いた
+  まま `SetMasterVolume` を呼んでいるが、検証用エンジンの出力は無音
+- 部位ごとのゲインがオフライン描画の出力に効くこと。中継は通常の初期化と同じ経路で、
+  検証用エンジンの出力は部位ゲインを反映しない
+- Linux / macOS でのビルドと実行
 
 ### 2026年10月23日 FITOM_X の文書再編に合わせて参照を直す
 

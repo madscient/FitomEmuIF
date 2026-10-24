@@ -36,6 +36,10 @@ int main() {
         assert(HWPlugin_GetLatencySamples(nullptr) == 0);
         assert(!HWPlugin_IsOpen(nullptr));
         PASS("meta functions with nullptr handle -> safe defaults");
+
+        float buf[4] = {};
+        assert(HWPlugin_Render(buf, 2) == HW_ERR_INVALID_ARG);
+        PASS("Render before Init -> HW_ERR_INVALID_ARG");
     }
 
     // 3. Init: 存在しないパスを明示指定 → HW_ERR_INVALID_ARG
@@ -43,6 +47,10 @@ int main() {
         HWResult r = HWPlugin_Init("/nonexistent/path/profile.json");
         assert(r == HW_ERR_INVALID_ARG);
         PASS("Init(nonexistent path) -> HW_ERR_INVALID_ARG");
+
+        assert(HWPlugin_InitOffline("/nonexistent/path/profile.json", 44100) == HW_ERR_INVALID_ARG);
+        assert(HWPlugin_InitOffline(nullptr, 0) == HW_ERR_INVALID_ARG);
+        PASS("InitOffline(nonexistent path / sample_rate 0) -> HW_ERR_INVALID_ARG");
     }
 
     // 4. Init: nullptr（デフォルト探索）→ プロファイルなし環境では HW_ERR_INVALID_ARG
@@ -71,6 +79,7 @@ int main() {
         assert(HWPlugin_Write(nullptr, 0, 0)              == HW_ERR_INVALID_ARG);
         assert(HWPlugin_WriteBlock(nullptr, 0, nullptr, 0) == HW_ERR_INVALID_ARG);
         assert(HWPlugin_Reset(nullptr, 0)                 == HW_ERR_INVALID_ARG);
+        assert(HWPlugin_SetMasterVolume(nullptr, 100)     == HW_ERR_INVALID_ARG);
         HWPlugin_Close(nullptr);           // crash しないこと
         HWPlugin_SetDelaySamples(nullptr, 0); // crash しないこと
         PASS("nullptr safety");
